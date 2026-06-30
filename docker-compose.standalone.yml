@@ -1,0 +1,24 @@
+# Runs the self-contained y/hub demo image (bundled PostgreSQL + Valkey).
+# Pull the published image from GHCR, or build locally (see the `build` block).
+#
+#   docker compose -f docker-compose.standalone.yml up
+#
+# WebSocket:  ws://localhost:3002/ws/{org}/{docid}?userid=alice
+# REST:       http://localhost:3002/activity/{org}/{docid}
+services:
+  yhub:
+    image: ghcr.io/nperez0111/yhub:master
+    # To build locally instead of pulling, comment out `image:` above and
+    # uncomment the build block below:
+    # build:
+    #   context: .
+    #   dockerfile: docker-standalone/Dockerfile
+    container_name: yhub
+    ports:
+      - "3002:3002"
+    volumes:
+      - yhub-data:/data
+    restart: unless-stopped
+
+volumes:
+  yhub-data:
