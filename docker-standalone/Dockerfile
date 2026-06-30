@@ -17,7 +17,9 @@ COPY docker-standalone/entrypoint.sh ./entrypoint.sh
 
 # Pass CORS_ORIGIN at `docker run` time to allow cross-origin browser access (see
 # .env.template). It stays unset here: while unset, cross-origin access is closed.
-ENV REDIS=redis://localhost:6379 \
+ARG BUILD_SHA=""
+ENV BUILD_SHA=${BUILD_SHA} \
+    REDIS=redis://localhost:6379 \
     REDIS_PREFIX=yhub \
     POSTGRES=postgres://yhub:yhub@localhost:5432/yhub \
     PORT=4400
