@@ -54,9 +54,10 @@ const filterContentMap = (contentMap, from, to, by, requestedIds, customAttribut
  * @param {Y.ContentIds} contentids
  * @param {string} userid
  * @param {Array<{k: string, v: string}>} customAttributions
+ * @param {number} [at] - override timestamp (unix ms). Defaults to now.
  */
-const createContentMap = (contentids, userid, customAttributions) => {
-  const now = time.getUnixTime()
+const createContentMap = (contentids, userid, customAttributions, at) => {
+  const now = at ?? time.getUnixTime()
   return Y.encodeContentMap(Y.createContentMapFromContentIds(
     contentids,
     [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
@@ -278,12 +279,12 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       break
     }
     case 'patchYdoc': {
-      const { update, currentDoc, userid, customAttributions = [] } = msg
+      const { update, currentDoc, userid, customAttributions = [], at } = msg
       const currentContentIds = Y.createContentIdsFromUpdate(currentDoc)
       const newContentIds = Y.excludeContentIds(Y.createContentIdsFromUpdate(update), currentContentIds)
       const diffedUpdate = /** @type {Uint8Array<ArrayBuffer>} */ (Y.intersectUpdateWithContentIds(update, newContentIds))
       if (diffedUpdate.byteLength > 3) {
-        const contentmap = createContentMap(Y.createContentIdsFromUpdate(diffedUpdate), userid, customAttributions)
+        const contentmap = createContentMap(Y.createContentIdsFromUpdate(diffedUpdate), userid, customAttributions, at)
         port.postMessage({ update: diffedUpdate, contentmap }, [diffedUpdate.buffer, contentmap.buffer])
       } else {
         port.postMessage(null)

@@ -69,7 +69,8 @@ const $computeTask = s.$union(
     update: s.$uint8Array,
     currentDoc: s.$uint8Array,
     userid: s.$string,
-    customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string }))
+    customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string })),
+    at: s.$number.optional
   }),
   s.$object({
     type: s.$literal('rollback'),
@@ -379,6 +380,7 @@ class ComputePool {
    * @param {Uint8Array<ArrayBuffer>} opts.currentDoc
    * @param {string} opts.userid
    * @param {Array<{k: string, v: string}>} opts.customAttributions
+   * @param {number} [opts.at] - override attribution timestamp (unix ms)
    * @param {Object<string, any>} [logContext]
    * @returns {Promise<{ update: Uint8Array<ArrayBuffer>, contentmap: Uint8Array<ArrayBuffer> } | null>}
    */

@@ -9,6 +9,7 @@ import { createDocumentPermissions, hasPermissions } from './permissions.js'
 // benign import cycle with api.js - apiError/checkPermissions are only referenced at request
 // time, never during module evaluation
 import { apiError, checkPermissions, encodedAny } from './api.js'
+import { mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'api' })
@@ -68,27 +69,41 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
     }
   },
   patch: {
-    $body: { update: s.$uint8Array.optional, awareness: s.$uint8Array.optional, customAttributions: s.$array($kv).optional },
+    $body: { update: s.$uint8Array.optional, by: s.$string.optional, at: s.$number.optional, awareness: s.$uint8Array.optional, customAttributions: s.$array($kv).optional, patches: s.$array(s.$object({ update: s.$uint8Array, by: s.$string.optional, at: s.$number.optional, customAttributions: s.$array($kv).optional })).optional },
     handler: async req => {
-      const { update, customAttributions = [] } = req.body
-      if (update == null && req.body.awareness == null) {
+      const { update, by, at, customAttributions = [], patches } = req.body
+      // Normalize single-patch and bulk forms into one ordered list of patches.
+      const patchList = patches != null
+        ? patches
+        : (update != null ? [{ update, by, at, customAttributions }] : [])
+      if (patchList.length === 0 && req.body.awareness == null) {
         throw apiError(400, 'Invalid request body')
       }
       // presence without awareness `u` is dropped, not refused - same as a cursor sent over a
       // socket lacking the bit. Only the update leg is a hard requirement, checked before the
       // first stream write
       const awareness = req.body.awareness != null && hasPermissions(req.permissions, createDocumentPermissions({ awareness: '--u-' })) ? req.body.awareness : null
-      if (update != null) checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '--u-' }))
-      // attributions carry the userid - permission first (403 names what is missing), identity second
-      if (update != null && req.authInfo == null) throw apiError(401, 'writing the document requires authentication', { code: 'unauthenticated' })
-      if (update != null) {
-        // Get current document state to diff against
+      if (patchList.length > 0) {
+        checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '--u-' }))
+        // attributions carry the userid - permission first (403 names what is missing), identity second
+        if (req.authInfo == null) throw apiError(401, 'writing the document requires authentication', { code: 'unauthenticated' })
+        // Build up the document state locally so each patch diffs against
+        // the result of all preceding patches in this request.
         const { gcDoc, nongcDoc, tombstone } = await req.yhub.getDoc(req.docRef, { gc: true, nongc: false }, { gcOnMerge: false })
         if (tombstone != null) throw new DocDeletedError(req.docRef, tombstone)
-        const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
-        const result = await req.yhub.computePool.patchYdoc({ update, currentDoc, userid: /** @type {string} */ (req.authInfo?.userid), customAttributions }, { docRef: req.docRef })
-        if (result != null) {
-          await req.yhub.stream.addMessage(req.docRef, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
+        let currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
+        for (const patch of patchList) {
+          const result = await req.yhub.computePool.patchYdoc({
+            update: patch.update,
+            currentDoc,
+            userid: patch.by || req.authInfo.userid,
+            customAttributions: patch.customAttributions ?? [],
+            at: patch.at
+          }, { docRef: req.docRef })
+          if (result != null) {
+            await req.yhub.stream.addMessage(req.docRef, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
+            currentDoc = mergeUpdates(false, [currentDoc, result.update])
+          }
         }
       } else {
         // an awareness-only body never reads the document, so this is the only gate it passes -
