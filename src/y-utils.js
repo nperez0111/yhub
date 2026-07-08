@@ -57,9 +57,10 @@ export const mergeUpdates = (gc, updates, prune) => {
  * @param {Y.ContentIds} contentids
  * @param {string} userid
  * @param {Array<{ k: string, v: string }>} customAttributions
+ * @param {number} [at] - override timestamp (unix ms). Defaults to now.
  */
-export const createContentMap = (contentids, userid, customAttributions) => {
-  const now = time.getUnixTime()
+export const createContentMap = (contentids, userid, customAttributions, at) => {
+  const now = at ?? time.getUnixTime()
   return Y.encodeContentMap(Y.createContentMapFromContentIds(
     contentids,
     [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
