@@ -51,11 +51,16 @@ export const conf = {
     // latter is safe here only because `credentials` stays off; browsers reject that pair.
     cors: corsOrigin === null ? undefined : { origin: corsOrigin.includes(',') ? corsOrigin.split(',').map(origin => origin.trim()).filter(origin => origin !== '') : corsOrigin.trim() },
     auth: types.createAuthPlugin({
-      // this demo configuration picks a "unique" userid and grants everyone full document
-      // access - including the destructive permissions the old blanket 'rw' implied. No
-      // org/branch/global grants: scopes without a handler deny, and this demo serves no
-      // endpoints at those scopes.
-      async authenticate (_req) { return { userid: random.oneOf(userIdChoices) } },
+      // Open demo server: the userid is taken straight from the connection
+      // string (e.g. ws://host/ws/:org/:docid?userid=alice). Attributions are
+      // saved against this userid. Falls back to a random name when omitted.
+      async authenticate (req) {
+        const userid = req.getQuery('userid')
+        return { userid: userid || random.oneOf(userIdChoices) }
+      },
+      // this demo configuration grants everyone full document access - including the
+      // destructive permissions the old blanket 'rw' implied. No org/branch/global grants:
+      // scopes without a handler deny, and this demo serves no endpoints at those scopes.
       authorize: types.createAuthorize({
         document: async () => ({
           type: 'permissions:document:v1',
