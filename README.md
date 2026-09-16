@@ -449,6 +449,18 @@ across restarts, mount a volume:
 docker run -p 4400:4400 -v yhub-data:/data ghcr.io/yjs/yhub/standalone:latest
 ```
 
+To let a browser app served from a different origin connect, set `CORS_ORIGIN`:
+
+```bash
+docker run -p 4400:4400 -e CORS_ORIGIN=https://app.example.com ghcr.io/yjs/yhub/standalone:latest
+```
+
+While `CORS_ORIGIN` is unset, cross-origin browser access is closed; same-origin
+pages and non-browser clients always work. A comma-separated value becomes an
+allowlist (wildcards like `https://*.example.com` included), and `'*'` opens the
+api to every origin — fine for local evaluation, and the server logs a warning.
+See [API.md → CORS](API.md#cors) for the full option set.
+
 Connect a Yjs client to `ws://localhost:4400/api/ws/v1/my-org/my-doc` and start
 collaborating.
 
