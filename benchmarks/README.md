@@ -10,7 +10,7 @@
 
 ```bash
 npm install              # in the repo root — the suite has no deps of its own
-npm run start:dbs        # in the repo root — Redis, PostgreSQL, MinIO
+npm run start:dbs        # in the repo root — Redis, PostgreSQL, RustFS
 npm run start:init       # in the repo root — create tables and buckets
 
 cd benchmarks
@@ -78,7 +78,7 @@ compaction (Y7.5). Sizes come from the trace, so `scale.docSizes` does not apply
 Two knobs worth knowing about:
 
 - **Disk.** Every compaction rewrites the whole document *and* its nongc twin, so
-  a run at 40 MB moves several GB through S3. If the backend fills up, MinIO
+  a run at 40 MB moves several GB through S3. If the backend fills up, it
   refuses writes and compaction **fails rather than slows** — documents never drain,
   benchmarks time out, and the numbers look plausible while being meaningless.
   The suite checks free space at startup, reclaims each benchmark's documents as
@@ -549,7 +549,7 @@ spreadsheets can be mapped onto our size steps. Three 40 MB variants — *fresh*
 (written once), *churned* (every cell rewritten ~10×), *row-churn* (rows inserted
 and deleted) — because they stress compaction very differently (Y5.3).
 
-**`s3Ops` matters more than S3 latency.** MinIO on localhost is far faster than
+**`s3Ops` matters more than S3 latency.** RustFS on localhost is far faster than
 real S3 or R2, so measured sync and compaction times are lower bounds. Recording
 operation counts and payload sizes lets real-world latency be layered on
 analytically instead of pretended away.

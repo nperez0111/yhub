@@ -35,8 +35,8 @@ export const config = {
       endPoint: env.getConf('S3_ENDPOINT') ?? 'localhost',
       port: number.parseInt(env.getConf('S3_PORT') ?? '9000'),
       useSSL: env.getConf('S3_SSL') === 'true',
-      accessKey: env.getConf('S3_ACCESS_KEY') ?? 'minioadmin',
-      secretKey: env.getConf('S3_SECRET_KEY') ?? 'minioadmin'
+      accessKey: env.getConf('S3_ACCESS_KEY') ?? 'yhub-dev-access-key',
+      secretKey: env.getConf('S3_SECRET_KEY') ?? 'yhub-dev-secret-key'
     }
   },
 

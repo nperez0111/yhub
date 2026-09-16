@@ -167,12 +167,12 @@ connection details for a dev environment that is unique to your checkout (see
 REDIS=redis://localhost:6379
 REDIS_PREFIX=yhub                 # Prefix for all Redis keys
 
-# S3 storage (MinIO compatible)
+# S3 storage (any S3-compatible store)
 S3_ENDPOINT=localhost
 S3_PORT=9000                      # locally: allocated by `npm run dev:env`
 S3_SSL=false
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin
+S3_ACCESS_KEY=yhub-dev-access-key
+S3_SECRET_KEY=yhub-dev-secret-key
 S3_YHUB_BUCKET=yhub               # Bucket for document storage
 
 # PostgreSQL connection
@@ -211,7 +211,7 @@ REDIS_TASK_DEBOUNCE=10000         # Worker task debounce time (ms)
 npm run dev:up
 ```
 
-This starts Valkey, PostgreSQL and MinIO in containers, creates the PostgreSQL
+This starts Valkey, PostgreSQL and RustFS in containers, creates the PostgreSQL
 tables and the S3 buckets, and writes the connection details to `.env`. Ports are
 allocated per checkout - see [Local Development](#local-development).
 
@@ -484,7 +484,7 @@ one process. Provisioning is handled by `scripts/dev-env.js`, which
   claimed in `~/.cache/yhub/dev-ports/`, derived from a hash of the checkout path),
 - writes them into the managed section at the bottom of `.env`, creating that file
   from `.env.template` if it does not exist yet,
-- starts Valkey, PostgreSQL and MinIO in a compose project named after the checkout, and
+- starts Valkey, PostgreSQL and RustFS in a compose project named after the checkout, and
 - creates the databases, tables and S3 buckets.
 
 Because every checkout gets its own ports, its own containers and its own volumes,
@@ -523,7 +523,7 @@ docker compose --profile app up
 
 ### S3 Persistence (`S3PersistenceV1`)
 
-Stores document blobs in any S3-compatible object store (AWS S3, MinIO, etc.).
+Stores document blobs in any S3-compatible object store (AWS S3, Cloudflare R2, RustFS, etc.).
 Objects larger than 5 MB are uploaded using S3 multipart upload.
 
 **Usage**
@@ -544,8 +544,8 @@ const yhub = await createYHub({
       endPoint:  'localhost',
       port:      9000,
       useSSL:    false,
-      accessKey: 'minioadmin',
-      secretKey: 'minioadmin',
+      accessKey: 'yhub-dev-access-key',
+      secretKey: 'yhub-dev-secret-key',
       // enable: false,       // stop persisting new assets, keep serving existing ones (default: true)
       // branches: ['main'],  // offload only the listed branches (default: every branch)
       // deleteVersions: false,  // versioned buckets: only place delete markers (default: erase versions)

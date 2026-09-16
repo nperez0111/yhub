@@ -37,7 +37,7 @@ export const resetPeakRss = () => {
 }
 
 /**
- * Counters for S3 operations. `s3Ops` matters more than local MinIO latency:
+ * Counters for S3 operations. `s3Ops` matters more than local RustFS latency:
  * counts let real-world S3/R2 latency be layered on analytically.
  */
 export const createS3Counters = () => ({ gets: 0, puts: 0, deletes: 0, getBytes: 0, putBytes: 0 })

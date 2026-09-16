@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Development
+
+- **The local S3 dev container is now RustFS 1.0.0 instead of MinIO.** MinIO archived its community edition and removed the `minio/minio` images from Docker Hub on 2026-09-11, so `npm run dev:up` and CI could no longer pull them. The compose service is renamed `minio` → `s3`; host ports (9010 S3 API, 9011 console) are unchanged. All images in `compose.yaml` are now referenced fully qualified (`docker.io/...`), which podman-compose needs to pull them without a TTY. Every published dev port is bound to `127.0.0.1`, so the dev containers are no longer reachable from the network. The default dev credentials are now `yhub-dev-access-key` / `yhub-dev-secret-key` instead of `minioadmin` (an existing `.env` keeps working: compose passes its credentials to the container). If the dev environment was running when you pulled this change, docker compose removes the orphaned minio container on the next `npm run dev:up`; with podman-compose run `npm run dev:down` once first. The old `<project>_minio` volume is no longer declared, so under docker compose `npm run dev:release` does not drop it — `docker volume rm <project>_minio` reclaims the space. ([`compose.yaml`](compose.yaml), [`.env.template`](.env.template), [`.github/workflows/test.yml`](.github/workflows/test.yml))
+
 ## [0.9.0]
 
 > **Upgrading:** `S3PersistenceV1` now offloads every branch and, on versioned buckets, deletes

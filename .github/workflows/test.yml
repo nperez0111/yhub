@@ -36,19 +36,18 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      minio:
-        image: minio/minio
+      s3:
+        image: docker.io/rustfs/rustfs:1.0.0
         env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
+          RUSTFS_ACCESS_KEY: yhub-dev-access-key
+          RUSTFS_SECRET_KEY: yhub-dev-secret-key
         ports:
           - 9000:9000
         options: >-
-          --health-cmd "mc ready local"
+          --health-cmd "curl -sf http://localhost:9000/health"
           --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
-        command: server /data
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v5
@@ -68,8 +67,8 @@ jobs:
           S3_ENDPOINT=localhost
           S3_PORT=9000
           S3_SSL=false
-          S3_ACCESS_KEY=minioadmin
-          S3_SECRET_KEY=minioadmin
+          S3_ACCESS_KEY=yhub-dev-access-key
+          S3_SECRET_KEY=yhub-dev-secret-key
           S3_YHUB_BUCKET=yhub
           S3_YHUB_TEST_BUCKET=yhub-testing
           POSTGRES=postgres://yhub:yhub@localhost:5432/yhub

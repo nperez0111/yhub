@@ -1,43 +1,48 @@
 # Dev infrastructure. All host ports and the project name come from `.env`, which is generated
 # per git worktree by `scripts/dev-env.js`. Start it with `npm run dev:up` (or `npm start`),
 # never with a bare `docker compose up` - the defaults below are only a fallback.
+# Published ports are bound to 127.0.0.1: the containers run with dev credentials and are meant
+# for this machine only.
 #
 # The `app` profile additionally runs yhub itself in containers:
 #   docker compose --profile app up
 services:
   valkey:
-    image: valkey/valkey:alpine
+    image: docker.io/valkey/valkey:alpine
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - valkey:/data
   postgres:
-    image: postgres:16-alpine
+    image: docker.io/library/postgres:16-alpine
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: yhub
       POSTGRES_PASSWORD: yhub
       POSTGRES_DB: yhub
     volumes:
       - postgres:/var/lib/postgresql/data
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
+  s3:
+    image: docker.io/rustfs/rustfs:1.0.0
     ports:
-      - "${S3_PORT:-9010}:9000"
-      - "${S3_CONSOLE_PORT:-9011}:9001"
+      - "127.0.0.1:${S3_PORT:-9010}:9000"
+      - "127.0.0.1:${S3_CONSOLE_PORT:-9011}:9001"
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-yhub-dev-access-key}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-yhub-dev-secret-key}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
+      interval: 2s
+      retries: 30
     volumes:
-      - minio:/data
+      - s3:/data
   server:
     build: .
     profiles: ["app"]
     command: node ./bin/server.js --no-colors
     ports:
-      - "${DOCKER_PORT:-4400}:${DOCKER_PORT:-4400}"
+      - "127.0.0.1:${DOCKER_PORT:-4400}:${DOCKER_PORT:-4400}"
     environment:
       PORT: ${DOCKER_PORT:-4400}
     env_file:
@@ -46,7 +51,7 @@ services:
     depends_on:
       - valkey
       - postgres
-      - minio
+      - s3
   worker:
     build: .
     profiles: ["app"]
@@ -57,9 +62,9 @@ services:
     depends_on:
       - valkey
       - postgres
-      - minio
+      - s3
 
 volumes:
   valkey:
   postgres:
-  minio:
+  s3:

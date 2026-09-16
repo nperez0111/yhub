@@ -48,7 +48,7 @@ const withTimeout = (p, ms, label) => Promise.race([
 
 /**
  * A run of this suite writes several GB to S3 — every compaction rewrites the
- * whole document and its nongc twin. If the storage backend fills up, MinIO
+ * whole document and its nongc twin. If the storage backend fills up, it
  * starts refusing writes, compaction fails rather than slows, documents never drain,
  * and benchmarks time out with numbers that look plausible and are not. Cheaper
  * to say so up front than to debug it afterwards.

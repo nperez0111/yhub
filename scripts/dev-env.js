@@ -2,7 +2,7 @@
 
 /**
  * Allocates a block of host ports for this worktree, so that several worktrees of this repo
- * can run their dev infrastructure (valkey / postgres / minio) and their test suites side by
+ * can run their dev infrastructure (valkey / postgres / s3) and their test suites side by
  * side without ever touching each other's data.
  *
  * The block is derived from a hash of the worktree path and claimed in
@@ -162,9 +162,9 @@ const canConnect = port => promise.create(resolve => {
 })
 
 if (env.hasParam('--up')) {
-  compose(['up', '-d'])
+  compose(['up', '-d', '--remove-orphans'])
   await promise.untilAsync(async () => (await promise.all([base + 1, base + 2, base + 3].map(canConnect))).every(ok => ok), 60000, 250)
-  // postgres and minio accept connections before they serve requests. init-db is idempotent,
+  // postgres and the s3 store accept connections before they serve requests. init-db is idempotent,
   // so retrying it is both the readiness check and the initialization.
   await promise.untilAsync(async () => {
     try {
@@ -176,10 +176,10 @@ if (env.hasParam('--up')) {
   }, 60000, 1000)
 }
 
-if (env.hasParam('--down')) compose(['down'])
+if (env.hasParam('--down')) compose(['down', '--remove-orphans'])
 
 if (env.hasParam('--release')) {
-  compose(['down', '-v'])
+  compose(['down', '-v', '--remove-orphans'])
   release(base)
 }
 

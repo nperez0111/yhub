@@ -161,7 +161,7 @@ await createYHub({
 
 ## S3 Persistence Plugin
 
-By default, YHub stores document data directly in PostgreSQL. For large documents or when you want to leverage S3-compatible storage (AWS S3, MinIO, etc.), you can use the S3 persistence plugin to store document data in S3 while keeping metadata in PostgreSQL.
+By default, YHub stores document data directly in PostgreSQL. For large documents or when you want to leverage S3-compatible storage (AWS S3, RustFS, etc.), you can use the S3 persistence plugin to store document data in S3 while keeping metadata in PostgreSQL.
 
 ### Setup
 
@@ -180,7 +180,7 @@ const yhub = await createYHub({
     new S3PersistenceV1({
       bucket: env.getConf('S3_YHUB_BUCKET'),
       endPoint: env.getConf('S3_ENDPOINT'),      // e.g. 's3.amazonaws.com' or 'localhost'
-      port: parseInt(env.getConf('S3_PORT')),    // e.g. 443 for AWS, 4419 for the local dev MinIO
+      port: parseInt(env.getConf('S3_PORT')),    // e.g. 443 for AWS, locally the port allocated by 'npm run dev:env'
       useSSL: env.getConf('S3_SSL') === 'true',
       accessKey: env.getConf('S3_ACCESS_KEY'),
       secretKey: env.getConf('S3_SECRET_KEY')
@@ -216,27 +216,28 @@ S3_YHUB_BUCKET=yhub
 - On a versioning-enabled bucket the plugin deletes the object version it recorded when storing; `deleteVersions: false` leaves delete markers instead, keeping the bytes restorable
 - On startup, the plugin automatically creates the bucket if it doesn't exist
 
-### Using MinIO for Local Development
+### Running an S3 Store Locally
 
-MinIO is an S3-compatible object storage that runs locally:
+Any S3-compatible object store works. In the y/hub repository `npm run dev:up` starts
+[RustFS](https://github.com/rustfs/rustfs) (Apache-2.0) for you; in your own project a
+minimal compose file looks like this:
 
 ```yaml
 # docker-compose.yml
 services:
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
+  s3:
+    image: docker.io/rustfs/rustfs:1.0.0
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_ACCESS_KEY: yhub-dev-access-key
+      RUSTFS_SECRET_KEY: yhub-dev-secret-key
     ports:
-      - "9010:9000"   # S3 API
-      - "9011:9001"   # Console
+      - "127.0.0.1:9010:9000"   # S3 API
+      - "127.0.0.1:9011:9001"   # Console
     volumes:
-      - minio-data:/data
+      - s3-data:/data
 
 volumes:
-  minio-data:
+  s3-data:
 ```
 
 Then configure with:
@@ -244,8 +245,8 @@ Then configure with:
 S3_ENDPOINT=localhost
 S3_PORT=9010
 S3_SSL=false
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin
+S3_ACCESS_KEY=yhub-dev-access-key
+S3_SECRET_KEY=yhub-dev-secret-key
 S3_YHUB_BUCKET=yhub
 ```
 

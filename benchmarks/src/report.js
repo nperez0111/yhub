@@ -223,7 +223,7 @@ export class Reporter {
         { key: 'observers swept', value: s.observers.join(', ') }
       ]),
       '',
-      'S3 is MinIO on localhost, so sync and compaction times are **lower bounds** —',
+      'S3 is RustFS on localhost, so sync and compaction times are **lower bounds** —',
       'real S3 or R2 latency has to be layered onto the `s3Ops` counts analytically.',
       ''
     ]

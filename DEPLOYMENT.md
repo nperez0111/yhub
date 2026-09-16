@@ -10,7 +10,8 @@ This guide covers setting up y/hub infrastructure for production.
 | PostgreSQL | Document metadata storage   |
 | S3         | Document blob storage       |
 
-Any S3-compatible storage works (AWS S3, Cloudflare R2, MinIO, etc.).
+Any S3-compatible storage works: AWS S3, Cloudflare R2, or a self-hosted store such as RustFS or
+VersityGW. MinIO's community edition is archived and its Docker images were removed in September 2026.
 
 ---
 
