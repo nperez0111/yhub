@@ -440,13 +440,18 @@ export class YHub {
    *
    * Changes won't be synced to users connected via websocket until they reconnect.
    *
+   * The row is stamped with the stream id `${ms}-0`, where `ms` is the redis `TIME`. Stream entries
+   * up to that id count as persisted, so a real stream entry in the same redis millisecond as the
+   * `TIME` call (the one with id `${ms}-0`) would be treated as already persisted: the initial sync
+   * and compaction skip it.
+   *
    * @param {t.DocRef} docRef
    * @param {Uint8Array<ArrayBuffer>} ydoc
    * @param {{ by?: string }} attributions
    */
   async unsafePersistDoc (docRef, ydoc, { by }) {
     const ms = await this.stream.getTime()
-    const lastClock = `${ms}-I`
+    const lastClock = `${ms}-0`
     const contentids = Y.createContentIdsFromUpdate(ydoc)
     /**
      * @type {Y.ContentAttribute<any>[]}

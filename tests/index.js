@@ -9,6 +9,7 @@ import * as storage from './storage.tests.js'
 import * as computeWorker from './computeWorker.tests.js'
 import * as agents from './agents.tests.js'
 import * as deleteDoc from './delete.tests.js'
+import * as stream from './stream.tests.js'
 import * as worker from './worker.tests.js'
 import * as permissions from './permissions.tests.js'
 import * as permissionsEnforcement from './permissionsEnforcement.tests.js'
@@ -19,6 +20,7 @@ runTests({
   permissionsEnforcement,
   computeWorker,
   storage,
+  stream,
   worker,
   api,
   customApi,

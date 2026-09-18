@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixes
+
+- **A document written by `unsafePersistDoc` no longer stops websocket fan-out for every document on the server.** `unsafePersistDoc` stamped its row with the clock `<ms>-I`, which is not a valid redis stream id. The first client to open such a document handed it to the server's shared `XREAD`; redis rejected the whole read, so no document on that server received stream updates until the client disconnected. The same clock could also reach the trim script, which crashed and left the compact task retrying forever. New rows are stamped `<ms>-0`, and existing `-I` rows are read as `<ms>-0` — no migration needed. **Importers that write `yhub_ydoc_v1` rows or read its `t` column directly:** `t` is a redis stream id `<ms>-<seq>` with both parts numeric; use `<ms>-0` for rows that don't come from a stream. (yjs/yhub#61)
+
 ### Development
 
 - **The local S3 dev container is now RustFS 1.0.0 instead of MinIO.** MinIO archived its community edition and removed the `minio/minio` images from Docker Hub on 2026-09-11, so `npm run dev:up` and CI could no longer pull them. The compose service is renamed `minio` → `s3`; host ports (9010 S3 API, 9011 console) are unchanged. All images in `compose.yaml` are now referenced fully qualified (`docker.io/...`), which podman-compose needs to pull them without a TTY. Every published dev port is bound to `127.0.0.1`, so the dev containers are no longer reachable from the network. The default dev credentials are now `yhub-dev-access-key` / `yhub-dev-secret-key` instead of `minioadmin` (an existing `.env` keeps working: compose passes its credentials to the container). If the dev environment was running when you pulled this change, docker compose removes the orphaned minio container on the next `npm run dev:up`; with podman-compose run `npm run dev:down` once first. The old `<project>_minio` volume is no longer declared, so under docker compose `npm run dev:release` does not drop it — `docker volume rm <project>_minio` reclaims the space. ([`compose.yaml`](compose.yaml), [`.env.template`](.env.template), [`.github/workflows/test.yml`](.github/workflows/test.yml))

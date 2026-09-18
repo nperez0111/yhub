@@ -1,3 +1,4 @@
+import * as Y from '@y/y'
 import * as t from 'lib0/testing'
 import * as promise from 'lib0/promise'
 import * as encoding from 'lib0/encoding'
@@ -144,6 +145,36 @@ export const testAuthCheckOnlyDoesNotPersist = async tc => {
   t.assert(persisted.gcDoc.length === 0, 'no gc doc assets should exist for an auth-check-only document')
   const streamExists = await yhub.stream.redis.exists(defaultStream)
   t.assert(!streamExists, 'auth-check-only stream should be trimmed and deleted (no persist, no infinite re-enqueue)')
+}
+
+/**
+ * `unsafePersistDoc` used to stamp its row `${ms}-I`. The first client to open such a document
+ * handed that clock to the shared `XREAD`, which redis rejected as a whole - no document on the
+ * server received stream updates anymore until the client disconnected.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUnsafePersistDocKeepsFanOut = async tc => {
+  const { createWsClient, yhub, defaultDocRef } = await utils.createTestCase(tc)
+  const imported = new Y.Doc()
+  imported.get().setAttr('imported', 1)
+  await yhub.unsafePersistDoc(defaultDocRef, Y.encodeStateAsUpdate(imported), { by: 'importer' })
+  t.assert((await yhub.persistence.retrieveDoc(defaultDocRef, {})).lastClock.endsWith('-0'), 'persisted clock is a valid stream id')
+  t.info('a client pair in another room exchanges updates')
+  const { ydoc: other1 } = await createWsClient({ docid: 'other', waitForSync: true })
+  const { ydoc: other2 } = await createWsClient({ docid: 'other', waitForSync: true })
+  other2.get().setAttr('x', 1)
+  await promise.until(10000, () => other1.get().getAttr('x') === 1)
+  t.info('client A opens the imported document')
+  const { ydoc: docA } = await createWsClient({ waitForSync: true })
+  t.assert(docA.get().getAttr('imported') === 1)
+  t.info('client B sends an update, A receives it')
+  const { ydoc: docB } = await createWsClient({ waitForSync: true })
+  docB.get().setAttr('b', 1)
+  await promise.until(10000, () => docA.get().getAttr('b') === 1)
+  t.info('the other room keeps receiving updates')
+  other2.get().setAttr('x', 2)
+  await promise.until(10000, () => other1.get().getAttr('x') === 2)
 }
 
 /**

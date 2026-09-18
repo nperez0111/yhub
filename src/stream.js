@@ -80,16 +80,31 @@ export const decodeRoomName = (rediskey, expectedPrefix) => {
 export const encodeQuarantineName = (docRef, prefix, qid) => `${prefix}:quarantine_room:${uriEncode(docRef.org)}:${uriEncode(docRef.docid)}:${uriEncode(docRef.branch)}:${qid}`
 
 /**
+ * Map a clock whose sequence is not a number to the valid stream id `${ms}-0`. Older releases
+ * stamped the rows of `unsafePersistDoc` with `${ms}-I`, which redis rejects - and a single
+ * rejected id fails the shared `XREAD` of every document subscribed on the server.
+ *
+ * @param {string} clock
+ * @return {string}
+ */
+export const sanitizeRedisClock = clock => {
+  const [ms, seq] = clock.split('-')
+  return seq == null || /^\d+$/.test(seq) ? clock : `${ms}-0`
+}
+
+/**
+ * A non-numeric sequence (see `sanitizeRedisClock`) counts as 0.
+ *
  * @param {string} a
  * @param {string} b
  * @return {boolean} iff a < b
  */
 export const isSmallerRedisClock = (a, b) => {
-  const [a1, a2 = '0'] = a.split('-')
-  const [b1, b2 = '0'] = b.split('-')
+  const [a1, a2] = a.split('-')
+  const [b1, b2] = b.split('-')
   const a1n = number.parseInt(a1)
   const b1n = number.parseInt(b1)
-  return a1n < b1n || (a1n === b1n && number.parseInt(a2) < number.parseInt(b2))
+  return a1n < b1n || (a1n === b1n && (number.parseInt(a2) || 0) < (number.parseInt(b2) || 0))
 }
 
 /**
@@ -372,7 +387,7 @@ export class Stream {
       await promise.wait(50)
       return []
     }
-    const streams = docRefs.map(asset => ({ key: s.$string.check(asset.docRef) ? asset.docRef : encodeRoomName(asset.docRef, this.prefix), id: asset.clock || '0' }))
+    const streams = docRefs.map(asset => ({ key: s.$string.check(asset.docRef) ? asset.docRef : encodeRoomName(asset.docRef, this.prefix), id: sanitizeRedisClock(asset.clock || '0') }))
     log.debug({ streamCount: streams.length }, 'retrieving messages')
     const readClient = redisClient ?? this.redis
     const reads = /** @type {Array<{name: Buffer, messages: Array<{id: Buffer, message: Record<string, Buffer>}>}> | null} */ (await readClient.withTypeMapping({
@@ -684,7 +699,7 @@ export class Stream {
    * @param {string?} taskid
    */
   async trimMessages (docRef, minId, maxAgeMs, taskid) {
-    await this.redis.trimMessages(encodeRoomName(docRef, this.prefix), minId, maxAgeMs, taskid || '')
+    await this.redis.trimMessages(encodeRoomName(docRef, this.prefix), sanitizeRedisClock(minId), maxAgeMs, taskid || '')
   }
 
   /**
