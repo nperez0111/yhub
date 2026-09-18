@@ -59,6 +59,7 @@ const $computeTask = s.$union(
     limit: s.$number,
     reverse: s.$boolean,
     group: s.$boolean,
+    groupByUser: s.$boolean,
     groupMaxGap: s.$number,
     groupMaxDuration: s.$number,
     groupExclude: s.$array(s.$string)
@@ -361,6 +362,7 @@ class ComputePool {
    * @param {number} opts.limit
    * @param {boolean} opts.reverse
    * @param {boolean} opts.group
+   * @param {boolean} opts.groupByUser
    * @param {number} opts.groupMaxGap
    * @param {number} opts.groupMaxDuration
    * @param {Array<string>} opts.groupExclude

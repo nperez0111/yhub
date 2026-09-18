@@ -126,7 +126,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       break
     }
     case 'activity': {
-      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration, groupExclude } = msg
+      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupByUser, groupMaxGap, groupMaxDuration, groupExclude } = msg
       const contentmap = Y.decodeContentMap(contentmapBin)
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
       const filteredAttributions = filterContentMap(contentmap, from, to, by || undefined, contentIds, withCustomAttributions)
@@ -175,22 +175,36 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         }
       })
       activity.sort((a, b) => a.from - b.from)
-      /** @type {Array<{ from: number, to: number, by: string?, delta?: any, attributions?: Uint8Array<ArrayBuffer>, renderedContent?: Uint8Array<ArrayBuffer>, customAttributions: Array<{k:string,v:string}>|null }>} */
+      /** @type {Array<{ from: number, to: number, by: string|null|Array<string|null>, delta?: any, attributions?: Uint8Array<ArrayBuffer>, renderedContent?: Uint8Array<ArrayBuffer>, customAttributions: Array<{k:string,v:string}>|null }>} */
       const activityResult = []
       const groupDistance = group ? groupMaxGap : 1
-      /** @type {{ from: number, to: number, by: string?, customAttributions: Array<{k:string,v:string}>|null }|null} */
+      /** @type {{ from: number, to: number, by: string|null|Array<string|null>, customAttributions: Array<{k:string,v:string}>|null }|null} */
       let lastActivity = null
+      // the previous change's author - with `groupByUser:false` an entry's `by` is its author list,
+      // so it can no longer answer "who wrote the change before this one"
+      /** @type {string?} */
+      let lastBy = null
+      // the open entry's author list (`groupByUser:false` only)
+      /** @type {Array<string|null>?} */
+      let byList = null
       activity.forEach(act => {
-        if (lastActivity != null && lastActivity.by === act.by && (act.by == null || !groupExclude.includes(act.by)) && act.from - lastActivity.to < groupDistance && act.to - lastActivity.from < groupMaxDuration) {
+        // a groupExclude'd user never merges in either direction - null authors are never excludable
+        const excluded = (act.by != null && groupExclude.includes(act.by)) || (lastBy != null && groupExclude.includes(lastBy))
+        if (lastActivity != null && !excluded && (!groupByUser || lastBy === act.by) && act.from - lastActivity.to < groupDistance && act.to - lastActivity.from < groupMaxDuration) {
           lastActivity.to = act.to
           lastActivity.customAttributions?.push(...(act?.customAttributions || []))
+          if (byList != null && !byList.includes(act.by)) byList.push(act.by)
         } else {
-          activityResult.push(act)
-          lastActivity = act
+          byList = groupByUser ? null : [act.by]
+          lastActivity = groupByUser ? act : { ...act, by: byList }
+          activityResult.push(lastActivity)
         }
+        lastBy = act.by
       })
       if (includeCustomAttributions) {
-        activity.forEach(act => {
+        // the result entries, not `activity`: with `groupByUser:false` a group head is a copy, and
+        // this reassigns `customAttributions` rather than mutating it in place
+        activityResult.forEach(act => {
           /** @type {Array<{k:string,v:string}>} */
           const uniqueCustomAttrs = []
           const unique = new Set()
@@ -220,11 +234,16 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         const doc = new Y.Doc({ gc: false })
         Y.applyUpdate(doc, Y.intersectUpdateWithContentIds(nongcDocBin, docContentIds))
         const root = doc.share.keys().next().value || ''
-        // Per-entry attribution overlay (`attrs`, uniformly stamped as the entry's author/time) and
-        // point-in-time baseline (`renderedContent` = content alive at the entry's `to`).
+        // Per-entry attribution overlay (`attrs`, uniformly stamped as the entry's author/time
+        // while `groupByUser` holds) and point-in-time baseline (`renderedContent` = content alive
+        // at the entry's `to`).
         const perItem = activityResult.map(act => {
           const actAttributions = filterContentMap(filteredAttributions, act.from, act.to, undefined, undefined, null)
-          const attrs = Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
+          // a `groupByUser:false` entry can have several authors - its original per-change
+          // attributions carry each author and its real timestamp, a uniform stamp could not
+          const attrs = groupByUser
+            ? Y.createContentMapFromContentIds(Y.createContentIdsFromContentMap(actAttributions), [Y.createContentAttribute('insert', act.by), Y.createContentAttribute('insertAt', act.from)], [Y.createContentAttribute('delete', act.by), Y.createContentAttribute('deleteAt', act.from)])
+            : actAttributions
           const afterContentIds = Y.createContentIdsFromContentMap(filterContentMap(contentmap, 0, act.to, undefined, undefined, null))
           return { attrs, renderedContent: Y.diffIdSet(afterContentIds.inserts, afterContentIds.deletes) }
         })

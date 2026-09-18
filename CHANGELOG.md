@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### New Features
+
+- **`GET /activity?groupByUser=false`** — bundle consecutive changes into one entry regardless of who made them, so `groupMaxGap`/`groupMaxDuration` alone decide the grouping. The entry's `by` is then a deduplicated array of every contributing user-id (always an array, even for a single author; `null` for changes with no recorded author), and its `attributions`/`delta` keep each change's own author and timestamp instead of a uniform stamp. Default `true`, which is the previous per-author behavior. Useful for a "what happened to this document between 9am and 10am" timeline, where interleaved edits should read as one session rather than one entry per author switch. ([API docs](API.md#activity))
+
 ### Fixes
 
 - **A document written by `unsafePersistDoc` no longer stops websocket fan-out for every document on the server.** `unsafePersistDoc` stamped its row with the clock `<ms>-I`, which is not a valid redis stream id. The first client to open such a document handed it to the server's shared `XREAD`; redis rejected the whole read, so no document on that server received stream updates until the client disconnected. The same clock could also reach the trim script, which crashed and left the compact task retrying forever. New rows are stamped `<ms>-0`, and existing `-I` rows are read as `<ms>-0` — no migration needed. **Importers that write `yhub_ydoc_v1` rows or read its `t` column directly:** `t` is a redis stream id `<ms>-<seq>` with both parts numeric; use `<ms>-0` for rows that don't come from a stream. (yjs/yhub#61)

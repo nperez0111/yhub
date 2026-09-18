@@ -216,6 +216,7 @@ const activityEndpoint = createApiEndpoint('activity', {
       limit: s.$number.optional,
       order: s.$(['asc', 'desc']).optional,
       group: s.$boolean.optional,
+      groupByUser: s.$boolean.optional,
       groupMaxGap: s.$number.optional,
       groupMaxDuration: s.$number.optional,
       // comma-separated userids exempt from grouping - the raw string is part of the cache key
@@ -241,6 +242,7 @@ const activityEndpoint = createApiEndpoint('activity', {
       const limit = query.limit ?? number.MAX_SAFE_INTEGER
       const reverse = query.order === 'desc'
       const group = query.group ?? true
+      const groupByUser = query.groupByUser ?? true
       const groupMaxGap = query.groupMaxGap ?? 1000
       const groupMaxDuration = query.groupMaxDuration ?? number.MAX_SAFE_INTEGER
       const groupExclude = query.groupExclude ? query.groupExclude.split(',') : []
@@ -248,11 +250,11 @@ const activityEndpoint = createApiEndpoint('activity', {
       const includeCustomAttributions = query.customAttributions ?? false
       const contentIds = query.contentIds ? buffer.fromBase64(query.contentIds) : undefined
       try {
-        const cacheArgs = [String(from), String(to), by, String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), query.groupExclude || '', query.withCustomAttributions || '', String(includeCustomAttributions), query.contentIds || '']
+        const cacheArgs = [String(from), String(to), by, String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), query.groupExclude || '', query.withCustomAttributions || '', String(includeCustomAttributions), query.contentIds || '', String(groupByUser)]
         return encodedAny(await req.yhub.stream.cachedGet(docRef, 'activity', cacheArgs, async () => {
           const { contentmap: contentmapBin, nongcDoc, tombstone } = await req.yhub.getDoc(docRef, { nongc: true, contentmap: true })
           if (tombstone != null) throw new DocDeletedError(docRef, tombstone)
-          return req.yhub.computePool.activity({ nongcDoc, contentmapBin, from, to, by, contentIds, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupMaxGap, groupMaxDuration, groupExclude }, { docRef })
+          return req.yhub.computePool.activity({ nongcDoc, contentmapBin, from, to, by, contentIds, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupByUser, groupMaxGap, groupMaxDuration, groupExclude }, { docRef })
         }))
       } catch (err) {
         // see the changeset endpoint

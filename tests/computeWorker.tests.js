@@ -137,6 +137,7 @@ export const testActivityGrouping = async _tc => {
     limit: Number.MAX_SAFE_INTEGER,
     reverse: false,
     group: true,
+    groupByUser: true,
     groupMaxGap: 1000,
     groupMaxDuration: Number.MAX_SAFE_INTEGER,
     groupExclude: [],
@@ -156,6 +157,79 @@ export const testActivityGrouping = async _tc => {
   // an exempt user's own edits never merge; excluding someone else changes nothing
   t.assert((await activity({ groupExclude: ['user1'] })).length === 3)
   t.compare((await activity({ groupExclude: ['someoneelse'] })).map(a => [a.from, a.to]), [[1000, 2000]])
+  doc.destroy()
+  await pool.destroy()
+}
+
+/**
+ * `groupByUser:false` lets consecutive changes merge across authors - the gap/duration bounds
+ * alone decide - and reports every contributing author in `by` as an array.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testActivityGroupByUser = async _tc => {
+  const pool = createComputePool({ poolSize: 2 })
+  const doc = new Y.Doc({ gc: false })
+  // three interleaved edits: user1@1000, user2@1500, user1@2000
+  doc.get('test').insert(0, 'hello')
+  const contentIds1 = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(doc))
+  const contentmap1 = Y.createContentMapFromContentIds(
+    contentIds1,
+    [Y.createContentAttribute('insert', 'user1'), Y.createContentAttribute('insertAt', 1000), Y.createContentAttribute('insert:source', 'import')],
+    [Y.createContentAttribute('delete', 'user1'), Y.createContentAttribute('deleteAt', 1000)]
+  )
+  doc.get('test').insert(5, ' world')
+  const contentIds2 = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(doc))
+  const contentmap2 = Y.createContentMapFromContentIds(
+    Y.excludeContentIds(contentIds2, contentIds1),
+    [Y.createContentAttribute('insert', 'user2'), Y.createContentAttribute('insertAt', 1500), Y.createContentAttribute('insert:source', 'import')],
+    [Y.createContentAttribute('delete', 'user2'), Y.createContentAttribute('deleteAt', 1500)]
+  )
+  doc.get('test').insert(11, '!')
+  const nongcDoc = Y.encodeStateAsUpdate(doc)
+  const contentmap3 = Y.createContentMapFromContentIds(
+    Y.excludeContentIds(Y.createContentIdsFromUpdate(nongcDoc), contentIds2),
+    [Y.createContentAttribute('insert', 'user1'), Y.createContentAttribute('insertAt', 2000), Y.createContentAttribute('insert:source', 'import')],
+    [Y.createContentAttribute('delete', 'user1'), Y.createContentAttribute('deleteAt', 2000)]
+  )
+  const contentmapBin = Y.encodeContentMap(Y.mergeContentMaps([contentmap1, contentmap2, contentmap3]))
+  /**
+   * @param {object} opts
+   * @return {Promise<Array<{ from: number, to: number, by: string|null|Array<string?>, customAttributions: Array<{k:string,v:string}>|null }>>}
+   */
+  const activity = async (opts = {}) => decoding.readAny(decoding.createDecoder(await pool.activity({
+    nongcDoc,
+    contentmapBin,
+    from: 0,
+    to: Number.MAX_SAFE_INTEGER,
+    by: '',
+    withCustomAttributions: null,
+    includeCustomAttributions: false,
+    includeDelta: false,
+    includeYdoc: false,
+    includeAttributions: false,
+    limit: Number.MAX_SAFE_INTEGER,
+    reverse: false,
+    group: true,
+    groupByUser: true,
+    groupMaxGap: 1000,
+    groupMaxDuration: Number.MAX_SAFE_INTEGER,
+    groupExclude: [],
+    ...opts
+  }))).activity
+  // grouping by user: the author changes on every edit, so nothing merges and `by` stays scalar
+  t.compare((await activity({})).map(a => [a.from, a.to, a.by]), [[1000, 1000, 'user1'], [1500, 1500, 'user2'], [2000, 2000, 'user1']])
+  // ignoring the author: the gaps alone decide, and `by` lists both authors without repeating user1
+  t.compare((await activity({ groupByUser: false })).map(a => [a.from, a.to, a.by]), [[1000, 2000, ['user1', 'user2']]])
+  // `by` is an array even when a single author contributed the whole entry
+  t.compare((await activity({ groupByUser: false, by: 'user1' })).map(a => a.by), [['user1'], ['user1']])
+  // the gap and duration bounds still apply
+  t.compare((await activity({ groupByUser: false, groupMaxGap: 400 })).map(a => [a.from, a.to, a.by]), [[1000, 1000, ['user1']], [1500, 1500, ['user2']], [2000, 2000, ['user1']]])
+  t.compare((await activity({ groupByUser: false, groupMaxGap: 10000, groupMaxDuration: 600 })).map(a => [a.from, a.to, a.by]), [[1000, 1500, ['user1', 'user2']], [2000, 2000, ['user1']]])
+  // an exempt user never merges in either direction, so nothing groups across their edit
+  t.compare((await activity({ groupByUser: false, groupExclude: ['user2'] })).map(a => [a.from, a.to, a.by]), [[1000, 1000, ['user1']], [1500, 1500, ['user2']], [2000, 2000, ['user1']]])
+  // custom attributions of a cross-author group are still combined and deduplicated
+  t.compare((await activity({ groupByUser: false, includeCustomAttributions: true })).map(a => a.customAttributions), [[{ k: 'source', v: 'import' }]])
   doc.destroy()
   await pool.destroy()
 }

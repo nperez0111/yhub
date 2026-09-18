@@ -172,6 +172,23 @@ export const testActivityGroupExclude = async tc => {
 }
 
 /**
+ * `groupByUser=false` reports the entry's authors as an array - always, even for the single user
+ * this hub authenticates. Cross-author merging is covered in computeWorker.tests.js, where a
+ * contentmap can carry more than one author.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testActivityGroupByUser = async tc => {
+  const { org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc } = await createWsClient({ waitForSync: true })
+  ydoc.get().applyDelta(delta.create().insert('hello').done())
+  await promise.wait(3000)
+  // the default is unchanged: a scalar author
+  t.compare((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}`)).activity.map((/** @type {any} */ a) => a.by), ['user1'])
+  t.compare((await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?groupByUser=false`)).activity.map((/** @type {any} */ a) => a.by), [['user1']])
+}
+
+/**
  * Pruning permanently compacts churned history: content that was both inserted and deleted within
  * the requested range is destroyed, so it no longer shows up in the activity API. Fresh insertions
  * (never deleted) and the visible document content are untouched.
