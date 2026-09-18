@@ -1,4 +1,5 @@
 import * as t from 'lib0/testing'
+import * as promise from 'lib0/promise'
 import * as utils from './utils.js'
 import * as stream from '../src/stream.js'
 
@@ -41,5 +42,48 @@ export const testTrimMessagesLegacyMinId = async tc => {
   t.assert(taskid != null, 'seed produced a pending compact task')
   await s.trimMessages(defaultDocRef, '1-I', 100000, taskid)
   t.assert(await s.redis.xLen(defaultStream) === 1, 'young message survived the trim')
+  await utils.waitTasksProcessed(yhub)
+}
+
+/**
+ * A throw while the subscription loop starts up must not leave `_subRunning` set. Otherwise every
+ * later `subscribe` sees a loop that is already running and the process stops delivering stream
+ * messages entirely.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testSubLoopRestartsAfterConnectFailure = async tc => {
+  const { yhub, defaultDocRef } = await utils.createTestCase(tc)
+  // a dedicated stream - the shared hub's subscription client is already connected, so it cannot
+  // take the failing-connect path anymore
+  const st = await stream.createStream(yhub.conf)
+  const conf = st.redisClientConf
+  // a closed port and no reconnects: `connect()` rejects instead of retrying
+  st.redisClientConf = { ...conf, url: 'redis://127.0.0.1:1', socket: { ...conf.socket, reconnectStrategy: false } }
+  await t.failsAsync(() => st._runSub())
+  t.assert(!st._subRunning, 'a thrown setup error released the loop flag')
+  st.redisClientConf = conf
+  /**
+   * @type {Array<any>}
+   */
+  const received = []
+  const subscriber = {
+    lastReceivedClock: '0',
+    /**
+     * @param {any} _docRef
+     * @param {Array<any>} ms
+     */
+    onStreamMessage: (_docRef, ms) => { received.push(...ms) },
+    destroy: () => {},
+    closeWithError: () => {}
+  }
+  st.subscribe(defaultDocRef, subscriber)
+  await st.addMessage(defaultDocRef, { type: 'awareness:v1', update: new Uint8Array([1, 2, 3]) })
+  await promise.until(10000, () => received.length > 0)
+  t.compare(received[0].type, 'awareness:v1')
+  st.unsubscribe(defaultDocRef, subscriber)
+  await promise.until(5000, () => !st._subRunning)
+  st.redisSubscriptions?.destroy()
+  st.redis.destroy()
   await utils.waitTasksProcessed(yhub)
 }

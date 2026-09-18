@@ -323,9 +323,17 @@ export class Stream {
     return this.redis.keys(`${this.prefix}:room:*`)
   }
 
+  /**
+   * Pull messages for all subscribed streams until no subscriber is left.
+   *
+   * `_subRunning` must be released on *every* exit path. A throw that left it set (a failing
+   * `connect()`, most likely) would make every later `subscribe` believe a loop is already
+   * running, and the process would silently stop delivering stream messages.
+   */
   async _runSub () {
-    if (!this._subRunning) {
-      this._subRunning = true
+    if (this._subRunning) return
+    this._subRunning = true
+    try {
       let redisSubscriptions = this.redisSubscriptions
       if (redisSubscriptions === null) {
         redisSubscriptions = redis.createClient(this.redisClientConf)
@@ -371,6 +379,7 @@ export class Stream {
           await promise.wait(3000)
         }
       }
+    } finally {
       this._subRunning = false
     }
   }
