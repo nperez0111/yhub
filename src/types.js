@@ -587,7 +587,8 @@ export const $config = s.$object({
     apiPrefix: s.$string.optional,
     /**
      * Maximum expected Ydoc size in bytes. Used as baseline to calculate WebSocket
-     * maxPayloadLength and maxBackpressure. (default: 500MB)
+     * maxPayloadLength and maxBackpressure. Updates are never split across frames, so this
+     * must exceed the largest document. (default: 500MB)
      */
     maxDocSize: s.$number.optional,
     /**

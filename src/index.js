@@ -62,9 +62,6 @@ export class YHub {
    * @param {p.Persistence} pers
    */
   constructor (conf, str, pers) {
-    if (conf.server) {
-      conf.server.maxDocSize = 500 * 1024 * 1024
-    }
     this.conf = conf
     this.stream = str
     this.persistence = pers
@@ -487,6 +484,10 @@ export class YHub {
  */
 export const createYHub = async conf => {
   t.$config.expect(conf)
+  // sanitize conf
+  if (conf.server) {
+    conf.server.maxDocSize ??= 500 * 1024 * 1024
+  }
   const stream = await strm.createStream(conf)
   const pers = await p.createPersistence(conf.postgres, conf.persistence)
   const yhub = new YHub(conf, stream, pers)
