@@ -38,7 +38,10 @@ const createContentMapFromParams = (contentids, userid, customAttributions) => {
 const reqToDocRef = req => {
   const org = /** @type {string} */ (req.getParameter(0))
   const docid = /** @type {string} */ (req.getParameter(1))
-  const branch = /** @type {string} */ (req.getQuery('branch')) ?? 'main'
+  // uws yields '' for a present-but-empty `?branch=` - it would address a branch that is not
+  // `main` and silently split the document away from it. An absent key is undefined → `main`.
+  const branch = req.getQuery('branch') ?? 'main'
+  if (branch === '') throw apiError(400, 'invalid branch')
   return { org, docid, branch }
 }
 

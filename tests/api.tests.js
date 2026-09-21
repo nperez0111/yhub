@@ -1031,3 +1031,32 @@ export const testRoomNameEncoding = async tc => {
   await s.deleteQuarantineStreams(sibling)
   await s.redis.del(stream.encodeRoomName(sibling, s.prefix))
 }
+
+/**
+ * A present-but-empty `?branch=` must be refused. It parses as `''`, which would address a branch
+ * that is not `main` and silently split the document away from it. An absent `?branch` still
+ * means `main`. See yjs/yhub#68.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testEmptyBranchIsRejected = async tc => {
+  const { org, defaultDocRef } = await utils.createTestCase(tc)
+  const base = `http://${utils.yhubHost}/api/ydoc/v1/${org}/${defaultDocRef.docid}`
+  // `accept: application/json` so the error body can be read back as json
+  const json = { accept: 'application/json' }
+  const bad = await fetch(`${base}?branch=`, { headers: json })
+  t.assert(bad.status === 400 && (await bad.json()).code === 'invalid-branch', 'GET ?branch= must be a 400 invalid-branch')
+  // the check runs before the body is read, so it applies to write endpoints too
+  const badPatch = await fetch(`${base}?branch=`, { method: 'PATCH', headers: json, body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({})) })
+  t.assert(badPatch.status === 400 && (await badPatch.json()).code === 'invalid-branch', 'PATCH ?branch= must be a 400 invalid-branch')
+
+  t.info('an absent ?branch addresses the same document as ?branch=main')
+  const localDoc = new Y.Doc()
+  localDoc.get().setAttr('a', 1)
+  const patched = await patchYhubRequest(`/api/ydoc/v1/${org}/${defaultDocRef.docid}?branch=main`, { update: Y.encodeStateAsUpdate(localDoc) })
+  t.assert(patched.success === true, 'PATCH ?branch=main should succeed')
+  const got = await fetchYhubResponse(`/api/ydoc/v1/${org}/${defaultDocRef.docid}`)
+  const readBack = new Y.Doc()
+  Y.applyUpdate(readBack, got.doc)
+  t.assert(readBack.get().getAttr('a') === 1, 'the branchless GET must see what ?branch=main wrote')
+}

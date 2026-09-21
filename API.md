@@ -28,7 +28,8 @@ version as well.
 * `ws://{host}/api/ws/v1/{org}/{docid}` parameters: `{ gc?: boolean, branch?: string, customAttributions?: string }`
   * `gc=true` (default): standard garbage-collected document
   * `gc=false`: full document history which can be used to reconstruct editing history.
-  * `branch="main"`: (default) The default branch-name if not specified otherwise.
+  * `branch="main"`: (default) The default branch-name if not specified otherwise. Omitting
+    `?branch` selects it; a present-but-empty `?branch=` is refused with `400 invalid branch`.
   * `branch=string`: Optionally, define a custom branch. Changes won't be automatically synced with other branches.
   * `customAttributions=string`: optional comma-separated `key:value` pairs (e.g. `source:ai,model:gpt4`). All updates sent through this connection will include these custom attributions in the contentmap, stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones.
 
@@ -143,6 +144,11 @@ await fetch(`/api/ydoc/v1/${org}/${docid}`, {
 ### Ydoc
 
 Retrieve and update the Yjs document via REST API.
+
+Every doc-scoped endpoint takes `?branch`. Omitting it addresses `main`; a present-but-empty
+`?branch=` is refused with `400` and `{ code: 'invalid-branch' }` before authentication runs — an
+empty branch is never a meaningful namespace, and serving it would silently split the document
+away from `main`.
 
 #### GET /api/ydoc/v1/{org}/{docid}
 
@@ -743,7 +749,7 @@ any time, also after `await`s:
 | `method` | `string` | `'get' \| 'post' \| 'put' \| 'patch' \| 'delete'` |
 | `path` | `string` | the request path, e.g. `/api/comments/v1/acme/readme` |
 | `org` | `string \| null` | `null` for global scope |
-| `docid`, `branch`, `docRef` | | only set for doc scope; `branch` from `?branch=` (default `'main'`) |
+| `docid`, `branch`, `docRef` | | only set for doc scope; `branch` from `?branch=` (default `'main'`; an empty `?branch=` is refused with `400`) |
 | `params` | `{ [name]: string }` | the named path segments declared via `path` |
 | `query` | `{ [name]: any }` | the url query attributes as a plain object. Attributes declared in the method's `$query` are coerced & validated (and typed via `createApiEndpoint`); all others are raw strings. Repeated keys: last wins. |
 | `headers` | `{ [name]: string }` | lowercased request headers |

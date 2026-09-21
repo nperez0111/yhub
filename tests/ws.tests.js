@@ -2,6 +2,7 @@ import * as Y from '@y/y'
 import * as t from 'lib0/testing'
 import * as promise from 'lib0/promise'
 import * as encoding from 'lib0/encoding'
+import WebSocket from 'ws'
 import * as utils from './utils.js'
 
 /**
@@ -192,4 +193,34 @@ export const testGcNonGcDocs = async tc => {
   t.assert(ydocNoGc.get().getAttr('a') === 2)
   // check that content was not gc'd
   t.assert(ydocNoGc.get()._map.get('a')?.left?.content.getContent()[0] === 1)
+}
+
+/**
+ * A present-but-empty `?branch=` must be refused. uws yields `''` for it (an absent key yields
+ * `undefined`), which would address a branch that is not `main` and silently split the document
+ * away from it - its own stream, its own snapshots. See yjs/yhub#68.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testEmptyBranchIsRejected = async tc => {
+  const { org, defaultDocRef, createWsClient } = await utils.createTestCase(tc)
+  // the provider reconnect-loops on a refused upgrade, so the status is read off a raw socket
+  /**
+   * @param {string} query
+   */
+  const wsStatus = query => promise.create(resolve => {
+    const ws = new WebSocket(`ws://${utils.yhubHost}/api/ws/v1/${org}/${defaultDocRef.docid}${query}`)
+    ws.on('open', () => { ws.close(); resolve('open') })
+    ws.on('unexpected-response', (_req, res) => { ws.terminate(); resolve(`${res.statusCode}`) })
+    ws.on('error', () => resolve('error'))
+  })
+  t.assert(await wsStatus('?branch=') === '400', 'an empty ?branch= must be refused with 400')
+  t.assert(await wsStatus('?branch=main') === 'open', '?branch=main must connect')
+  t.assert(await wsStatus('') === 'open', 'an absent ?branch must connect')
+
+  t.info('an absent ?branch addresses the same document as ?branch=main')
+  const { ydoc: explicit } = await createWsClient({ branch: 'main', waitForSync: true })
+  explicit.get().setAttr('a', 1)
+  const { ydoc: implicit } = await createWsClient({ branch: null, waitForSync: true })
+  await promise.until(10000, () => implicit.get().getAttr('a') === 1)
 }

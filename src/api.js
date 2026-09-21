@@ -460,6 +460,12 @@ const createApiHandler = (yhub, { method, handler, scope, requiredEndpoint, path
       sendErrorResponse(res, writeHeaders, statusLine(403), { error: 'origin not allowed', code: 'origin-not-allowed' }, true)
       return
     }
+    // a present-but-empty `?branch=` parses as '' - it would address a branch that is not `main`
+    // and silently split the document away from it. An absent `?branch` still means `main`.
+    if (branch === '') {
+      sendErrorResponse(res, writeHeaders, statusLine(400), { error: 'invalid branch', code: 'invalid-branch' }, acceptsJson)
+      return
+    }
     const docRef = scope === 'document' ? /** @type {t.DocRef} */ ({ org, docid, branch }) : null
     // the resource the route addresses, in the shape `authorize` expects for its scope
     const resourceId = docRef ?? (scope === 'org' ? /** @type {{ org: string }} */ ({ org }) : {})
