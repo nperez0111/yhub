@@ -1315,7 +1315,10 @@ time by default (`deleteVersions: true`). Versions it has no record of — objec
 version was recorded, duplicates left by a crashed or concurrent compaction, or objects no row
 ever referenced — are not searched for and deleted; expiring them is the operator's job, e.g. via
 bucket lifecycle rules. Best-effort caveats apply here too: a deferred deletion is dropped if the
-process exits within its 10-second grace window, and failures are logged but not retried. With
+process exits within its grace window (`deleteDelay`, 10 seconds by default, and not worth
+lowering — it is what lets an in-flight reader finish). A deletion that fails with a transient error (a
+dropped connection, a momentary timeout, `503`/`429`) is retried once, after `retryDelay` ms;
+anything else, and a retry that fails again, is logged and dropped. With
 `deleteVersions: false` nothing is erased at all: deletes leave markers, and cleanup — or
 restoration of the raw bytes — is the operator's job.
 

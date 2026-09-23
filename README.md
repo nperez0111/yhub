@@ -549,6 +549,8 @@ const yhub = await createYHub({
       // enable: false,       // stop persisting new assets, keep serving existing ones (default: true)
       // branches: ['main'],  // offload only the listed branches (default: every branch)
       // deleteVersions: false,  // versioned buckets: only place delete markers (default: erase versions)
+      // retryDelay: 1000,       // ms to wait before retrying a transient failure (default: 1000)
+      // deleteDelay: 10000,     // ms to defer an erase, keep >= 10000 (default: 10000)
     })
   ],
   server: { /* ... */ },
@@ -573,6 +575,20 @@ this feature, or duplicates left by a crashed or concurrent compaction — are n
 deleted; expire them with lifecycle rules. Note that yhub drops its PostgreSQL rows on deletion
 either way — `deleteVersions: false` preserves raw blobs for manual recovery (e.g. re-import via
 `unsafePersistDoc`), not live documents.
+
+Every S3 call — store, retrieve, and delete — is retried once if it fails with a transient error
+(a dropped keepalive connection, a momentary timeout, `503`/`429`), which matters most for the
+deferred delete: nothing observes its result, so a failure there would orphan the object in the
+bucket. `retryDelay` is the pause before that second attempt, in milliseconds (default `1000`),
+giving a dead socket time to be discarded before it is reused. Anything that is not transient is
+never retried.
+
+Separately, `delete` does not erase the object immediately: it waits `deleteDelay` milliseconds
+(default `10000`) so that a reader which already resolved the reference can still fetch the bytes.
+**Keep this at 10 seconds or more.** A shorter window races those in-flight reads, and a client
+that was legitimately handed a reference then fails to retrieve the document. Lower values exist
+for tests, which set `0` to run the deferred path immediately. Raising it is safe — it only widens
+the window in which a deleted object is still billable.
 
 The environment variables `S3_ENDPOINT`, `S3_PORT`, `S3_SSL`, `S3_ACCESS_KEY`,
 `S3_SECRET_KEY`, and `S3_YHUB_BUCKET` are mapped to these fields by the default

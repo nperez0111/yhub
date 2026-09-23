@@ -2,6 +2,7 @@ import * as Y from '@y/y'
 import * as t from 'lib0/testing'
 import * as types from '../src/types.js'
 import * as env from 'lib0/environment'
+import * as promise from 'lib0/promise'
 import { S3PersistenceV1 } from '@y/hub/plugins/s3'
 import { yhub } from './utils.js'
 
@@ -212,4 +213,49 @@ export const testS3EnableOption = async tc => {
   t.assert(await disabled.store(assetId, asset) === null, 'a disabled plugin never stores')
   t.compare(await disabled.retrieve(assetId, stored), asset, 'but it still resolves existing references')
   t.assert(await disabled.delete(assetId, stored), 'and still cleans them up')
+}
+
+/**
+ * The erase is deferred and nothing observes its result, so a dropped keepalive connection would
+ * orphan the object. `_erase` retries a transient failure once; `retryDelay: 0` skips the pause
+ * between the two attempts.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testS3DeleteRetriesTransient = async tc => {
+  const plugin = new S3PersistenceV1({ ...s3TestConf(), retryDelay: 0 })
+  /** @type {types.AssetId} */
+  const assetId = { type: 'id:ydoc:v1', org: tc.testName, docid: 'index', branch: 'main', t: '1-0', gc: true }
+  /** @type {types.Asset} */
+  const asset = { type: 'asset:ydoc:v1', update: new Uint8Array([1, 2, 3]) }
+  const ref = /** @type {import('@y/hub/plugins/s3').RetrievableS3Asset} */ (await plugin.store(assetId, asset))
+  const removeObject = plugin.s3client.removeObject.bind(plugin.s3client)
+  let calls = 0
+  plugin.s3client.removeObject = async (bucket, objectName, opts) => {
+    if (++calls === 1) {
+      throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
+    }
+    return removeObject(bucket, objectName, opts)
+  }
+  await plugin._erase(types.assetIdToString(assetId), ref.versionId)
+  t.assert(calls === 2, 'the transient failure was retried exactly once')
+  t.assert(await plugin.retrieve(assetId, ref) === null, 'the object is gone')
+}
+
+/**
+ * `delete` defers the erase by `deleteDelay` so in-flight readers can still fetch the object -
+ * production keeps the 10s default, tests set 0 to run the deferred path immediately.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testS3DeleteDelay = async tc => {
+  const plugin = new S3PersistenceV1({ ...s3TestConf(), deleteDelay: 0 })
+  /** @type {types.AssetId} */
+  const assetId = { type: 'id:ydoc:v1', org: tc.testName, docid: 'index', branch: 'main', t: '1-0', gc: true }
+  /** @type {types.Asset} */
+  const asset = { type: 'asset:ydoc:v1', update: new Uint8Array([1, 2, 3]) }
+  const ref = /** @type {import('@y/hub/plugins/s3').RetrievableS3Asset} */ (await plugin.store(assetId, asset))
+  t.compare(await plugin.retrieve(assetId, ref), asset, 'the object is there before the delete')
+  t.assert(await plugin.delete(assetId, ref), 'the erase was scheduled')
+  await promise.untilAsync(async () => await plugin.retrieve(assetId, ref) === null, 5000)
 }
