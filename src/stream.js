@@ -655,30 +655,43 @@ export class Stream {
    */
   async claimTasks (count) {
     const reclaimedTasks = await this.redis.xAutoClaim(this.workerStreamName, this.workerGroupName, this.consumername, this.taskDebounce, '0', { COUNT: count })
-    if (reclaimedTasks.deletedMessages != null && reclaimedTasks.deletedMessages.length > 0) {
-      log.warn({ deletedMessages: reclaimedTasks.deletedMessages }, 'deleting ghost tasks from stream')
+    // ids to drop from the queue: ghosts redis already deleted from the stream, plus compact
+    // entries whose key doesn't decode. The latter will never become decodable, so leaving them
+    // pending hands them back to us - and to every other worker - on every round, forever.
+    const discard = [...(reclaimedTasks.deletedMessages ?? [])]
+    if (discard.length > 0) log.warn({ deletedMessages: discard }, 'deleting ghost tasks from stream')
+    /**
+     * @type {Array<t.Task & { redisClock: string }>}
+     */
+    const tasks = []
+    for (const m of reclaimedTasks.messages) {
+      if (m == null) {
+        // an entry that was deleted from the stream but is still pending - redis reports the id
+        // in `deletedMessages`, not here, so there is nothing to clean up
+        log.warn('found ghost task in stream')
+      } else if (m.message.compact == null) {
+        // not garbage - this is what a task type added by a newer release looks like to us. Leave
+        // it pending for a worker that understands it; deleting it here would silently drop that
+        // release's work for the length of a rolling upgrade.
+        log.warn({ id: m.id, task: m.message }, 'found unknown task type, leaving it for another worker')
+      } else {
+        try {
+          tasks.push({ type: 'compact', docRef: decodeRoomName(m.message.compact, this.prefix), redisClock: m.id })
+        } catch (err) {
+          log.error({ err, id: m.id, compact: m.message.compact }, 'discarding undecodable task')
+          discard.push(m.id)
+        }
+      }
+    }
+    if (discard.length > 0) {
       const multi = this.redis.multi()
-      for (const id of reclaimedTasks.deletedMessages) {
+      discard.forEach(id => {
         multi.xAck(this.workerStreamName, this.workerGroupName, id)
         multi.xDel(this.workerStreamName, id)
-      }
-      multi.exec().catch(err => log.error({ err }, 'error cleaning up ghost tasks'))
+      })
+      // best effort - a failed cleanup just means we discard it again next round
+      multi.exec().catch(err => log.error({ err }, 'error cleaning up tasks'))
     }
-    const tasks = reclaimedTasks.messages.map(m => {
-      if (m?.message.compact != null) {
-        return {
-          type: /** @type {const} */ ('compact'),
-          docRef: decodeRoomName(m.message.compact, this.prefix),
-          redisClock: m?.id
-        }
-      } else if (m === null) {
-        log.warn('deleting ghost task from stream')
-        return null
-      } else {
-        log.error({ keys: Object.keys(m?.message ?? {}) }, 'found unknown task type')
-        return null
-      }
-    }).filter(t => t != null)
     return tasks
   }
 

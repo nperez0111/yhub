@@ -242,3 +242,55 @@ export const testConcurrentCompactionKeepsTheDocument = async tc => {
   gcDoc.forEach(update => Y.applyUpdate(restored, update))
   t.compare(restored.get('text').toString(), 'important content', 'the document survived the concurrent compaction')
 }
+
+/**
+ * A compact entry whose key doesn't decode must not take the batch it was claimed in down with
+ * it: `xAutoClaim` already took ownership of every entry in that batch, so throwing out of
+ * `claimTasks` drops the legitimate tasks next to it and leaves the offender pending to poison
+ * the next round just the same. It is dropped from the queue instead.
+ *
+ * An entry of an unknown *type* is the opposite case and is deliberately kept: it never throws,
+ * so it wedges nothing, and it is exactly what a task type added by a newer release looks like
+ * during a rolling upgrade. Deleting it would silently discard that release's work.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testUndecodableTaskDoesNotWedgeTheWorker = async tc => {
+  const prefix = 'yhub:testing:poison'
+  const taskDebounce = 1000
+  await clearPrefix(prefix)
+  /**
+   * @type {Array<string>}
+   */
+  const completed = []
+  const hub = await createWorkerHub({ taskDebounce, taskComplete: ({ docRef }) => completed.push(docRef.docid) }, prefix)
+  const redis = utils.yhub.stream.redis
+  // park an undecodable compact entry and an entry of a type we don't know. XADD alone only
+  // appends - the XREADGROUP is what puts them in the pending list, which is the only thing
+  // claimTasks (XAUTOCLAIM) looks at. This is what the addMessage lua does for a real task.
+  await redis.xAdd(hub.stream.workerStreamName, '*', { compact: `${prefix}:room:garbage` })
+  await redis.xAdd(hub.stream.workerStreamName, '*', { nonsense: '1' })
+  await redis.xReadGroup(hub.stream.workerGroupName, 'pending', { key: hub.stream.workerStreamName, id: '>' }, { COUNT: 2 })
+
+  const docRef = { org: utils.defaultOrg, docid: tc.testName + '-index', branch: 'main' }
+  await seedDocRef(hub, docRef, 'poisoned')
+  // the bad entries idle out first, so they are claimed either alongside this document's task or
+  // in the round right before it. Either way the document has to be compacted without delay -
+  // before the fix the worker never got past them and this deadline is never met.
+  await promise.untilAsync(() => completed.includes(docRef.docid), taskDebounce * 3, 50)
+  // the undecodable compact entry is dropped, the unknown type stays for a worker that knows it.
+  // `waitDrained` is no use here - its XLEN of the worker stream never reaches 0 by design.
+  await promise.untilAsync(async () => {
+    const entries = await redis.xRange(hub.stream.workerStreamName, '-', '+')
+    return entries.length === 1 && entries[0].message.nonsense === '1'
+  }, 10000, 50)
+  const pending = await redis.xPendingRange(hub.stream.workerStreamName, hub.stream.workerGroupName, '-', '+', 10)
+  t.compare(pending.length, 1, 'the unknown task type is still pending for another worker to claim')
+
+  const { gcDoc } = await hub.persistence.retrieveDoc(docRef, { gc: true })
+  const restored = new Y.Doc()
+  gcDoc.forEach(update => Y.applyUpdate(restored, update))
+  t.compare(restored.get('text').toString(), 'poisoned', 'the document next to the bad entries was compacted')
+  // the surviving entry is re-claimed and re-logged every round for as long as this worker runs
+  hub.stopWorker()
+}
