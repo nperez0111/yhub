@@ -27,6 +27,10 @@ if (useYNative) {
  * @returns {Uint8Array<ArrayBuffer>}
  */
 export const mergeUpdates = (gc, updates, prune) => {
+  // a single update is already merged unless it needs to be garbage-collected
+  if (updates.length === 1 && !gc && prune == null) {
+    return updates[0]
+  }
   if (useYNative && prune == null) {
     return /** @type {Uint8Array<ArrayBuffer>} */ (applyUpdates(gc, updates))
   }

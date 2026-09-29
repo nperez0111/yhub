@@ -219,7 +219,6 @@ class WSUser {
           }
         }
       })
-      // @todo send this as a single update message
       if (ydocUpdates.length > 0) {
         this.sendData(protocol.encodeSyncUpdate(mergeUpdates(false, ydocUpdates)))
       }

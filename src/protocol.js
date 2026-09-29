@@ -22,6 +22,8 @@ export const messageSyncUpdate = 2
  * @param {Array<Uint8Array>} ms
  */
 export const mergeAwarenessUpdates = ms => {
+  // a single update needs no merge - receivers apply the same clock rules the merge would
+  if (ms.length === 1) return encoding.encode(encoder => writeAwarenessUpdate(encoder, ms[0]))
   const aw = new awarenessProtocol.Awareness(new Y.Doc())
   // The Awareness constructor seeds `setLocalState({})` for its own clientID,
   // which would leak as a phantom client to every consumer of the merged bytes.
