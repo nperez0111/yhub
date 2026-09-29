@@ -194,7 +194,7 @@ an awareness-only body passes on awareness `u` alone, and without it answers `20
 written.
 
 * `PATCH /api/ydoc/v1/{org}/{docid}` body: `{ update?: Uint8Array, awareness?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }` parameters: `{ branch?: string }`
-  * `update`: optional Yjs update (encoded via `Y.encodeStateAsUpdate` or similar). Diffed against the current document state — only new content is applied and attributed. Attributions are automatically assigned to the authenticated user.
+  * `update`: optional Yjs update. Appended to the document's stream as-is, like an update sent over a socket: content the document already holds keeps its original attribution, and only content the server sees for the first time is attributed to the authenticated user. **Send a delta** — `Y.encodeStateAsUpdate(ydoc, Y.encodeStateVectorFromUpdate(doc))` against the `doc` you fetched — rather than the whole document: a whole-document body is stored, compacted and fanned out to every connected client in full.
   * `awareness`: optional awareness update bytes — the bare output of `encodeAwarenessUpdate(awareness, clientIds)` from `@y/protocols/awareness` (no `messageAwareness` wire-format prefix). Distributed to connected clients through the same Redis channel the WebSocket path uses.
   * `customAttributions`: optional array of key-value pairs to attach as custom attributions to the `update`'s changes. Stored as `insert:<key>` / `delete:<key>` attribution attributes alongside the standard ones. Has no effect when only `awareness` is supplied.
   * `branch="main"` (default): the branch to update
@@ -223,8 +223,8 @@ Y.applyUpdate(ydoc, doc)
 // Make local changes
 ydoc.getText('content').insert(0, 'Hello World')
 
-// Encode the update and send it
-const update = Y.encodeStateAsUpdate(ydoc)
+// Encode only what changed since the fetched state and send it
+const update = Y.encodeStateAsUpdate(ydoc, Y.encodeStateVectorFromUpdate(doc))
 const encoder = encoding.createEncoder()
 encoding.writeAny(encoder, { update })
 const body = encoding.toUint8Array(encoder)

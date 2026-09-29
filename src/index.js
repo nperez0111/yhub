@@ -253,30 +253,39 @@ export class YHub {
     cachedMessages.messages.forEach(m => {
       // only add update messages that are newer that what we currently know
       if (t.$updateMessage.check(m) && strm.isSmallerRedisClock(persistedDoc.lastClock, m.redisClock)) {
+        const msgContentmap = Y.decodeContentMap(m.contentmap)
         // attributions can only be assigned once. Filter out "known" attributions
-        const mcontentmap = Y.excludeContentMap(Y.decodeContentMap(m.contentmap), mergedContentIds)
+        const mcontentmap = Y.excludeContentMap(msgContentmap, mergedContentIds)
         const mcontentids = Y.createContentIdsFromContentMap(mcontentmap)
+        // a message may re-send structs the document already holds - a whole-document body carries
+        // every deleted id as a gc'd stub, a replayed message its original content. The encoding
+        // the server accepted first is the one that stays: content is never replaced by a stub, and
+        // pruned content is never brought back. Every delete is kept. mergeUpdates keeps the first
+        // encoding as well; cutting the re-sent structs here makes the invariant yhub's own and
+        // spares the merge the repeated structs.
+        const all = Y.createContentIdsFromContentMap(msgContentmap)
+        const update = Y.diffIdSet(all.inserts, mcontentids.inserts).isEmpty()
+          ? m.update
+          : Y.intersectUpdateWithContentIds(m.update, Y.createContentIds(mcontentids.inserts, all.deletes))
         Y.insertIntoIdSet(mergedContentIds.inserts, mcontentids.inserts)
         Y.insertIntoIdSet(mergedContentIds.deletes, mcontentids.deletes)
-        gcDoc?.push(m.update)
-        nongcDoc?.push(m.update)
+        gcDoc?.push(update)
+        nongcDoc?.push(update)
         contentmap?.push(mcontentmap)
         contentids.push(mcontentids)
       }
     })
-    // prune directives garbage-collect churned history: drop the referenced IdSet from the
-    // nongc doc, the contentmap, and the contentids. Applied unconditionally (idempotent).
+    // prune directives garbage-collect churned history: drop the referenced IdSet from the nongc
+    // doc and the contentmap. Applied unconditionally (idempotent). The ids stay in the contentids,
+    // which record every id the server ever accepted: a later message carrying a pruned id can then
+    // neither attribute it again nor bring its content back.
     const pruneMsgs = cachedMessages.messages.filter(m => t.$pruneMessage.check(m))
     const pruneSet = pruneMsgs.length > 0 ? Y.mergeIdSets(pruneMsgs.map(m => Y.decodeIdSet(m.prune))) : null
     const mergedContentmap = contentmap != null ? Y.mergeContentMaps(contentmap) : null
     const mergedCids = Y.mergeContentIds(contentids)
-    if (pruneSet != null) {
-      if (mergedContentmap != null) {
-        mergedContentmap.inserts = Y.diffIdMap(mergedContentmap.inserts, pruneSet)
-        mergedContentmap.deletes = Y.diffIdMap(mergedContentmap.deletes, pruneSet)
-      }
-      mergedCids.inserts = Y.diffIdSet(mergedCids.inserts, pruneSet)
-      mergedCids.deletes = Y.diffIdSet(mergedCids.deletes, pruneSet)
+    if (pruneSet != null && mergedContentmap != null) {
+      mergedContentmap.inserts = Y.diffIdMap(mergedContentmap.inserts, pruneSet)
+      mergedContentmap.deletes = Y.diffIdMap(mergedContentmap.deletes, pruneSet)
     }
     const pruneBin = pruneSet != null ? Y.encodeIdSet(pruneSet) : undefined
     return {

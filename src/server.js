@@ -6,10 +6,9 @@ import * as object from 'lib0/object'
 import * as promise from 'lib0/promise'
 import * as Y from '@y/y'
 import * as s from 'lib0/schema'
-import * as time from 'lib0/time'
 import * as protocol from './protocol.js'
 import * as math from 'lib0/math'
-import { mergeUpdates } from './y-utils.js'
+import { createContentMap, mergeUpdates } from './y-utils.js'
 import { registerApi, resolveApiPrefix, resolvePermissions, normalizeAuthorizeAnswer, apiError, isApiError, statusLine } from './api.js'
 import { originAllowed, resolveCors } from './cors.js'
 import { parseCustomAttributionsParam } from './builtin-api.js'
@@ -17,20 +16,6 @@ import { endpointPermission } from './permissions.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'ws' })
-
-/**
- * @param {Y.ContentIds} contentids
- * @param {string} userid
- * @param {Array<{ k: string, v: string }>} customAttributions
- */
-const createContentMapFromParams = (contentids, userid, customAttributions) => {
-  const now = time.getUnixTime()
-  return Y.encodeContentMap(Y.createContentMapFromContentIds(
-    contentids,
-    [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
-    [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
-  ))
-}
 
 /**
  * @param {uws.HttpRequest} req
@@ -478,7 +463,7 @@ const registerWebsocketServer = (yhub, app, prefix, cors) => {
                 // an anonymous socket never holds ydoc `u` and ws `u` together (upgrade invariant,
                 // kept by recheckAuth: a newly granted mask differs from the stored one and closes
                 // the connection)
-                const contentmap = createContentMapFromParams(Y.createContentIdsFromUpdate(update), /** @type {string} */ (user.userid), user.customAttributions)
+                const contentmap = createContentMap(Y.createContentIdsFromUpdate(update), /** @type {string} */ (user.userid), user.customAttributions)
                 yhub.stream.addMessage(user.docRef, { type: 'ydoc:update:v1', contentmap, update }).catch(handleErr)
               }
             } else if (syncMessageType === protocol.messageSyncStep1) {

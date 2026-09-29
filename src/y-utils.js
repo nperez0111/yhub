@@ -1,4 +1,5 @@
 import * as env from 'lib0/environment'
+import * as time from 'lib0/time'
 import * as Y from '@y/y'
 import { applyUpdates } from '@y-crdt/yn'
 import { logger } from './logger.js'
@@ -42,4 +43,22 @@ export const mergeUpdates = (gc, updates, prune) => {
   const result = Y.encodeStateAsUpdate(ydoc)
   ydoc.destroy()
   return result
+}
+
+/**
+ * The contentmap of an update: every id it inserts or deletes, attributed to `userid` now plus the
+ * caller's custom attributions. The map may cover a whole-document body - `getDoc` keeps only the
+ * ids it has not accepted before.
+ *
+ * @param {Y.ContentIds} contentids
+ * @param {string} userid
+ * @param {Array<{ k: string, v: string }>} customAttributions
+ */
+export const createContentMap = (contentids, userid, customAttributions) => {
+  const now = time.getUnixTime()
+  return Y.encodeContentMap(Y.createContentMapFromContentIds(
+    contentids,
+    [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
+    [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
+  ))
 }

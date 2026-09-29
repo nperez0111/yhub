@@ -1,6 +1,7 @@
 import * as t from 'lib0/testing'
 import * as Y from '@y/y'
 import * as decoding from 'lib0/decoding'
+import * as delta from 'lib0/delta'
 import { createComputePool } from '../src/compute.js'
 
 /**
@@ -337,5 +338,44 @@ export const testTaskTimeoutKillsWorkerThread = async _tc => {
   resultDoc.destroy()
   doc1.destroy()
   doc2.destroy()
+  await pool.destroy()
+}
+
+/**
+ * A whole-document update from a gc'd client (the GET -> edit -> PATCH body) carries a
+ * ContentDeleted stub for every deleted id the nongc history holds with content. Merged after the
+ * persisted history - the order getDoc uses - the stub must not replace the content, otherwise
+ * rollback has nothing to restore. Pins @y/y >= 14.0.0-rc.28, whose mergeUpdates keeps the
+ * encoding it saw first; before, a clock tie went to the later update.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testMergeUpdatesKeepsDeletedContent = async _tc => {
+  const pool = createComputePool({ poolSize: 2 })
+  /**
+   * @param {string} padding long enough to leave the inline path (> 5120 bytes)
+   */
+  const check = async padding => {
+    const server = new Y.Doc({ gc: false })
+    server.get().applyDelta(delta.create().insert(padding + 'abc').done())
+    server.get().applyDelta(delta.create().retain(padding.length + 1).delete(1).done()) // 'b' deleted, content retained
+    const nongcDoc = Y.encodeStateAsUpdate(server)
+    const gcClient = new Y.Doc() // gc: 'b' becomes a ContentDeleted stub on apply
+    Y.applyUpdate(gcClient, nongcDoc)
+    gcClient.get().applyDelta(delta.create().insert('d').done())
+    const patch = Y.encodeStateAsUpdate(gcClient)
+    const merged = await pool.mergeUpdates(false, [nongcDoc, patch])
+    const doc = new Y.Doc({ gc: false })
+    Y.applyUpdate(doc, merged)
+    t.compare(doc.get().toDelta(), delta.create(delta.$deltaAny).insert('d' + padding + 'ac'))
+    // what the rollback task does: undo the deletion from the nongc doc
+    Y.undoContentIds(doc, Y.createContentIds(Y.createIdSet(), Y.createContentIdsFromUpdate(merged).deletes), { ignoreRemoteAttributeChanges: true })
+    t.compare(doc.get().toDelta(), delta.create(delta.$deltaAny).insert('d' + padding + 'abc'), 'deleted content survives a gc\'d whole-document update')
+    doc.destroy()
+    server.destroy()
+    gcClient.destroy()
+  }
+  await check('') // inline (<= 5120 bytes)
+  await check('x'.repeat(6000)) // worker thread
   await pool.destroy()
 }

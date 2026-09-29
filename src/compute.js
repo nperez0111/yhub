@@ -65,13 +65,6 @@ const $computeTask = s.$union(
     groupExclude: s.$array(s.$string)
   }),
   s.$object({
-    type: s.$literal('patchYdoc'),
-    update: s.$uint8Array,
-    currentDoc: s.$uint8Array,
-    userid: s.$string,
-    customAttributions: s.$array(s.$object({ k: s.$string, v: s.$string }))
-  }),
-  s.$object({
     type: s.$literal('rollback'),
     nongcDoc: s.$uint8Array,
     contentmapBin: s.$uint8Array,
@@ -371,19 +364,6 @@ class ComputePool {
    */
   activity (opts, logContext = {}) {
     return this.run({ type: 'activity', ...opts }, [], logContext)
-  }
-
-  /**
-   * @param {object} opts
-   * @param {Uint8Array<ArrayBuffer>} opts.update
-   * @param {Uint8Array<ArrayBuffer>} opts.currentDoc
-   * @param {string} opts.userid
-   * @param {Array<{k: string, v: string}>} opts.customAttributions
-   * @param {Object<string, any>} [logContext]
-   * @returns {Promise<{ update: Uint8Array<ArrayBuffer>, contentmap: Uint8Array<ArrayBuffer> } | null>}
-   */
-  patchYdoc (opts, logContext = {}) {
-    return this.run({ type: 'patchYdoc', ...opts }, [], logContext)
   }
 
   /**

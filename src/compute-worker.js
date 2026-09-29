@@ -1,8 +1,7 @@
 import { parentPort } from 'node:worker_threads'
 import * as Y from '@y/y'
-import * as time from 'lib0/time'
 import * as encoding from 'lib0/encoding'
-import { mergeUpdates } from './y-utils.js'
+import { createContentMap, mergeUpdates } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'compute-worker' })
@@ -48,20 +47,6 @@ const filterContentMap = (contentMap, from, to, by, requestedIds, customAttribut
     contentMap = Y.filterContentMap(contentMap, attrFilter, attrFilter)
   }
   return contentMap
-}
-
-/**
- * @param {Y.ContentIds} contentids
- * @param {string} userid
- * @param {Array<{k: string, v: string}>} customAttributions
- */
-const createContentMap = (contentids, userid, customAttributions) => {
-  const now = time.getUnixTime()
-  return Y.encodeContentMap(Y.createContentMapFromContentIds(
-    contentids,
-    [Y.createContentAttribute('insert', userid), Y.createContentAttribute('insertAt', now), ...customAttributions.map(attr => Y.createContentAttribute('insert:' + attr.k, attr.v))],
-    [Y.createContentAttribute('delete', userid), Y.createContentAttribute('deleteAt', now), ...customAttributions.map(attr => Y.createContentAttribute('delete:' + attr.k, attr.v))]
-  ))
 }
 
 const port = parentPort
@@ -275,19 +260,6 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       encoding.writeAny(encoder, includeYdoc ? { ydoc: ydocOut, activity: activityResult } : { activity: activityResult })
       const result = encoding.toUint8Array(encoder)
       port.postMessage(result, [result.buffer])
-      break
-    }
-    case 'patchYdoc': {
-      const { update, currentDoc, userid, customAttributions = [] } = msg
-      const currentContentIds = Y.createContentIdsFromUpdate(currentDoc)
-      const newContentIds = Y.excludeContentIds(Y.createContentIdsFromUpdate(update), currentContentIds)
-      const diffedUpdate = /** @type {Uint8Array<ArrayBuffer>} */ (Y.intersectUpdateWithContentIds(update, newContentIds))
-      if (diffedUpdate.byteLength > 3) {
-        const contentmap = createContentMap(Y.createContentIdsFromUpdate(diffedUpdate), userid, customAttributions)
-        port.postMessage({ update: diffedUpdate, contentmap }, [diffedUpdate.buffer, contentmap.buffer])
-      } else {
-        port.postMessage(null)
-      }
       break
     }
     case 'rollback': {

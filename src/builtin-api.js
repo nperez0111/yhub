@@ -9,6 +9,7 @@ import { createDocumentPermissions, hasPermissions } from './permissions.js'
 // benign import cycle with api.js - apiError/checkPermissions are only referenced at request
 // time, never during module evaluation
 import { apiError, checkPermissions, encodedAny } from './api.js'
+import { createContentMap } from './y-utils.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ module: 'api' })
@@ -81,21 +82,16 @@ const ydocEndpoint = createApiEndpoint('ydoc', {
       if (update != null) checkPermissions(req.permissions, createDocumentPermissions({ ydoc: '--u-' }))
       // attributions carry the userid - permission first (403 names what is missing), identity second
       if (update != null && req.authInfo == null) throw apiError(401, 'writing the document requires authentication', { code: 'unauthenticated' })
-      if (update != null) {
-        // Get current document state to diff against
-        const { gcDoc, nongcDoc, tombstone } = await req.yhub.getDoc(req.docRef, { gc: true, nongc: false }, { gcOnMerge: false })
-        if (tombstone != null) throw new DocDeletedError(req.docRef, tombstone)
-        const currentDoc = gcDoc || nongcDoc || Y.encodeStateAsUpdate(new Y.Doc())
-        const result = await req.yhub.computePool.patchYdoc({ update, currentDoc, userid: /** @type {string} */ (req.authInfo?.userid), customAttributions }, { docRef: req.docRef })
-        if (result != null) {
-          await req.yhub.stream.addMessage(req.docRef, { type: 'ydoc:update:v1', contentmap: result.contentmap, update: result.update })
-        }
-      } else {
-        // an awareness-only body never reads the document, so this is the only gate it passes -
-        // writing awareness to a hard-deleted document would re-create the stream key the deletion
-        // just cleared
-        const tombstone = await req.yhub.persistence.retrieveTombstone(req.docRef)
-        if (tombstone != null) throw new DocDeletedError(req.docRef, tombstone)
+      // neither leg reads the document, so this is the only gate either passes - writing to a
+      // hard-deleted document would re-create the stream key the deletion just cleared
+      const tombstone = await req.yhub.persistence.retrieveTombstone(req.docRef)
+      if (tombstone != null) throw new DocDeletedError(req.docRef, tombstone)
+      // appended as-is, like a socket update: getDoc accepts each id once, so a whole-document
+      // body neither re-attributes nor overwrites what the server already holds. `> 3` is the
+      // empty-update sentinel the ws path uses.
+      if (update != null && update.byteLength > 3) {
+        const contentmap = createContentMap(Y.createContentIdsFromUpdate(update), /** @type {string} */ (req.authInfo?.userid), customAttributions)
+        await req.yhub.stream.addMessage(req.docRef, { type: 'ydoc:update:v1', contentmap, update })
       }
       if (awareness != null) {
         await req.yhub.stream.addMessage(req.docRef, { type: 'awareness:v1', update: awareness })

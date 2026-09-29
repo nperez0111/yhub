@@ -575,7 +575,7 @@ export const testActivityContentIdsFilter = async tc => {
   const { ydoc: syncedDoc } = await createWsClient({ waitForSync: true })
   const syncedYtype = syncedDoc.get('map')
   /**
-   * @param {Y.Type} ytype
+   * @param {Y.Node} ytype
    * @param {string} key
    */
   const getAttributeHistory = async (ytype, key) => {
@@ -1059,4 +1059,112 @@ export const testEmptyBranchIsRejected = async tc => {
   const readBack = new Y.Doc()
   Y.applyUpdate(readBack, got.doc)
   t.assert(readBack.get().getAttr('a') === 1, 'the branchless GET must see what ?branch=main wrote')
+}
+
+/**
+ * A whole-document PATCH body (GET -> edit -> PATCH) is appended as-is, so its own contentmap
+ * covers every id of the body. Attributions are assigned once: getDoc drops the ids it already
+ * attributed, so the pre-existing content keeps its author and time and only the new content
+ * carries the PATCH's attribution - while the body is on the stream and after compaction.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPatchWholeDocAttributesOnlyNewContent = async tc => {
+  const { yhub, org, createWsClient, defaultDocRef } = await utils.createTestCase(tc)
+  const { ydoc, provider } = await createWsClient({ waitForSync: true, wsParams: { customAttributions: 'source:ws' } })
+  ydoc.get().applyDelta(delta.create().insert('old').done())
+  await promise.wait(200)
+  provider.destroy()
+  const patchTs = Date.now()
+  const { doc } = await fetchYhubResponse(`/api/ydoc/v1/${org}/${ydoc.guid}`)
+  const local = new Y.Doc()
+  Y.applyUpdate(local, doc)
+  local.get().applyDelta(delta.create().insert('new ').done())
+  const res = await patchYhubRequest(`/api/ydoc/v1/${org}/${ydoc.guid}`, { update: Y.encodeStateAsUpdate(local), customAttributions: [{ k: 'source', v: 'patch' }] })
+  t.assert(res.success === true)
+  const check = async () => {
+    const { nongcDoc, contentmap } = await yhub.getDoc(defaultDocRef, { nongc: true, contentmap: true })
+    const rendered = new Y.Doc({ gc: false })
+    Y.applyUpdate(rendered, nongcDoc)
+    const [newOp, oldOp] = /** @type {Array<any>} */ (rendered.get().toDelta({ renderer: Y.createAttributionsRenderer(Y.decodeContentMap(contentmap)) }).toJSON().children)
+    t.assert(newOp.insert === 'new ' && newOp.attribution['insert:source'] === 'patch' && newOp.attribution.insertAt >= patchTs)
+    t.assert(oldOp.insert === 'old' && oldOp.attribution['insert:source'] === 'ws' && oldOp.attribution.insertAt < patchTs, 'pre-existing content keeps its attribution')
+    t.compare(oldOp.attribution.insert, ['user1'])
+    rendered.destroy()
+  }
+  await check() // the body is still on the stream
+  await utils.waitTasksProcessed(yhub) // compaction persists the merged contentmap
+  await check()
+  local.destroy()
+}
+
+/**
+ * GET the (gc'd) document, edit, PATCH the whole state: the body carries a stub for every deleted
+ * id. A rollback of a deletion made before the PATCH must still restore the text after the body
+ * was compacted into the persisted nongc doc.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPatchWholeDocThenRollback = async tc => {
+  const { yhub, org, createWsClient } = await utils.createTestCase(tc)
+  const { ydoc, provider } = await createWsClient({ waitForSync: true })
+  ydoc.get().applyDelta(delta.create().insert('abc').done())
+  await promise.wait(100)
+  ydoc.get().applyDelta(delta.create().retain(1).delete(1).done()) // 'b' deleted
+  await promise.wait(100)
+  provider.destroy()
+  const activity = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
+  t.assert(activity.length === 2)
+  const { doc } = await fetchYhubResponse(`/api/ydoc/v1/${org}/${ydoc.guid}`)
+  const local = new Y.Doc() // gc: 'b' is a ContentDeleted stub in here
+  Y.applyUpdate(local, doc)
+  local.get().applyDelta(delta.create().insert('d').done())
+  t.assert((await patchYhubRequest(`/api/ydoc/v1/${org}/${ydoc.guid}`, { update: Y.encodeStateAsUpdate(local) })).success === true)
+  local.destroy()
+  await utils.waitTasksProcessed(yhub) // a lossy merge would now be persisted for good
+  const rollback = await postYhubRequest(`/api/rollback/v1/${org}/${ydoc.guid}`, { from: activity[1].from, to: activity[1].to })
+  t.assert(rollback.success === true)
+  const { ydoc: after } = await createWsClient({ waitForSync: true })
+  t.compare(after.get().toDelta(), delta.create(delta.$deltaAny).insert('dabc'), 'rollback restores text deleted before the whole-document PATCH')
+}
+
+/**
+ * A prune stays pruned: a client that fetched the full history before the prune and later PATCHes
+ * its whole state carries the pruned content and its ids. getDoc accepts each id once - the ids
+ * stay in the contentids after a prune - so the body neither re-attributes the pruned churn to
+ * the patcher nor brings its content back, before and after compaction.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testPatchAfterPruneKeepsPrune = async tc => {
+  const { yhub, org, createWsClient, defaultDocRef } = await utils.createTestCase(tc)
+  const { ydoc, provider } = await createWsClient({ waitForSync: true })
+  ydoc.get().applyDelta(delta.create().insert('abc').done())
+  await promise.wait(100)
+  ydoc.get().applyDelta(delta.create().retain(1).delete(1).done()) // 'b' is churn
+  await promise.wait(100)
+  provider.destroy()
+  // the full history, fetched before the prune - 'b' still carries its content here
+  const stale = new Y.Doc({ gc: false })
+  Y.applyUpdate(stale, (await fetchYhubResponse(`/api/ydoc/v1/${org}/${ydoc.guid}?gc=false`)).doc)
+  const activity = (await fetchYhubResponse(`/api/activity/v1/${org}/${ydoc.guid}?group=false`)).activity
+  t.assert(activity.length === 2)
+  t.assert((await postYhubRequest(`/api/prune/v1/${org}/${ydoc.guid}`, { from: activity[0].from, to: activity[1].to })).success === true)
+  await utils.waitTasksProcessed(yhub)
+  stale.get().applyDelta(delta.create().insert('d').done())
+  t.assert((await patchYhubRequest(`/api/ydoc/v1/${org}/${ydoc.guid}`, { update: Y.encodeStateAsUpdate(stale) })).success === true)
+  stale.destroy()
+  const check = async () => {
+    const { nongcDoc, contentmap } = await yhub.getDoc(defaultDocRef, { nongc: true, contentmap: true })
+    // the only deletion ever made was pruned - nothing may attribute it again
+    t.assert(Y.createContentIdsFromContentMap(Y.decodeContentMap(contentmap)).deletes.isEmpty(), 'the pruned churn is not re-attributed')
+    const doc = new Y.Doc({ gc: false })
+    Y.applyUpdate(doc, nongcDoc)
+    Y.undoContentIds(doc, Y.createContentIds(Y.createIdSet(), Y.createContentIdsFromUpdate(nongcDoc).deletes), { ignoreRemoteAttributeChanges: true })
+    t.compare(doc.get().toDelta(), delta.create(delta.$deltaAny).insert('dac'), 'the pruned content is not brought back')
+    doc.destroy()
+  }
+  await check() // the body is still on the stream
+  await utils.waitTasksProcessed(yhub)
+  await check()
 }

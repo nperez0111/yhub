@@ -124,7 +124,7 @@ CREATE TABLE yhub_ydoc_v1 (
     gcDoc       bytea,          -- Garbage-collected update (or an S3 reference)
     nongcDoc    bytea,          -- Full-history update (or an S3 reference)
     contentmap  bytea,          -- Attribution content map
-    contentids  bytea,          -- Attributed content ids
+    contentids  bytea,          -- Accepted content ids, pruned ones included
     PRIMARY KEY (org, docid, branch, t)
 );
 
