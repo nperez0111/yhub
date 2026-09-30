@@ -4,13 +4,18 @@
 
 > **Upgrading: run `npm run start:init` (`bin/init-db.js`) before starting this version.** It adds
 > the `yhub_ydoc_versions_v1` table. Servers and workers do not create tables themselves, so
-> without this step every call of the new `version` endpoint — and every `activity` request of a
-> caller granted `history.version` — fails with `relation "yhub_ydoc_versions_v1" does not
-> exist`. Callers without that grant are unaffected. The script is idempotent.
+> without this step every **hard deletion** fails with `relation "yhub_ydoc_versions_v1" does not
+> exist` — the purge erases the document's named versions too, so this hits deployments that never
+> use versions — as do every call of the new `version` endpoint and every `activity` request of a
+> caller granted `history.version`. A hard deletion that failed this way leaves the document
+> deleted but not purged - re-run the deletion once the table exists, it is idempotent. The docker
+> image runs the script on every start, and the script is idempotent too.
 
 ### Breaking Changes
 
-- **Integers beyond 2^53 − 1 are refused with `400`.** lib0 `1.0.0-rc.36` limits `s.$uint` to safe integers, so a `from`/`to`/`t` above `Number.MAX_SAFE_INTEGER` — e.g. `activity?to=1e20`, which used to mean "unbounded" — is now an invalid query or body. Omit the bound, or pass `Number.MAX_SAFE_INTEGER`. ([`package.json`](package.json))
+- **Integers beyond 2^53 − 1 are refused with `400`.** lib0 `1.0.0-rc.36` limits `s.$uint` to safe integers, so a `from`/`to`/`t` above `Number.MAX_SAFE_INTEGER` — e.g. `activity?to=1e20`, which used to mean "unbounded" — is now an invalid query or body. Omit the bound, or pass `Number.MAX_SAFE_INTEGER`. This applies to custom endpoints too: a `$query`/`$body` spec using `s.$uint` refuses such a value with `400` as well. ([`package.json`](package.json))
+
+- **The normalized permission view has two more `history` keys.** `req.permissions.history` (and a websocket connection's view) now also carries `version` (a crud mask, `'----'` when not granted) and `publish` (a boolean). Code that deep-compares the normalized `history` object, or TypeScript that builds a `DocumentPermissionsV1Normalized` by hand, has to include them. Permission objects returned by an auth plugin are unaffected — both keys are optional there. ([`src/permissions.js`](src/permissions.js))
 
 - **`version` is a reserved endpoint name.** It names the new built-in named-version endpoint, so a custom endpoint called `version` (in any api version) now fails at startup, like the other built-in names. ([API docs](API.md#custom-api-endpoints))
 

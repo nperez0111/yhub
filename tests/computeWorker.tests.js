@@ -142,7 +142,7 @@ export const testActivityGrouping = async _tc => {
     groupMaxGap: 1000,
     groupMaxDuration: Number.MAX_SAFE_INTEGER,
     groupExclude: [],
-    versions: [],
+    // no `versions` - callers from before named versions keep working
     ...opts
   }))).activity
   // default: 500ms gaps are below groupMaxGap=1000, everything merges
