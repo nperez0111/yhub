@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.1]
+
 > **Upgrading: run `npm run start:init` (`bin/init-db.js`) before starting this version.** It adds
 > the `yhub_ydoc_versions_v1` table. Servers and workers do not create tables themselves, so
 > without this step every **hard deletion** fails with `relation "yhub_ydoc_versions_v1" does not
