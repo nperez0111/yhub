@@ -486,6 +486,145 @@ export const testHistoryClampAndContentLeak = async tc => {
 }
 
 /**
+ * Named versions are a crud mask within the history ray (`history.version`): reads clamp to the
+ * ray, writes refuse points before it. The activity carries them only for callers that may read
+ * them - silently - and an explicit `?versions=true` without the grant is refused. Writing a
+ * version attributes it, so it needs an identity; deleting one doesn't.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testNamedVersionPermissions = async tc => {
+  resetPermTable()
+  permTable.admin = { document: docPerms({ ydoc: 'cru-', history: { from: 0, version: 'crud' }, endpoint: { '*': 'crud' } }) }
+  const { org } = await utils.createTestCase(tc)
+  const path = `/version/v1/${org}/${tc.testName}-index`
+  const activity = `/activity/v1/${org}/${tc.testName}-index?group=false`
+  const json = (/** @type {string} */ method, /** @type {object} */ body) => /** @type {RequestInit} */ ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const create = (/** @type {number|undefined} */ t, name = 'v') => json('POST', { type: 'version:v1', t, name })
+  const put = (/** @type {number} */ t) => json('PUT', { type: 'version:v1', t, name: 'x' })
+  // the updatedAt a client read - the version at `t` as the admin sees it
+  const updatedAt = async (/** @type {number} */ t) => (await decodeResponse(await enfFetch(`${path}?from=${t}&to=${t}`, 'admin'))).versions[0].updatedAt
+  const patch = async (/** @type {number} */ t) => json('PATCH', { type: 'version:v1', t, name: 'patched', updatedAt: await updatedAt(t) })
+  const update = new Y.Doc()
+  update.get().setAttr('a', 1)
+  t.assert((await enfFetch(`/ydoc/v1/${org}/${tc.testName}-index`, 'admin', { method: 'PATCH', headers: { 'content-type': 'application/octet-stream' }, body: /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny({ update: Y.encodeStateAsUpdate(update) })) })).status === 200)
+  // client-supplied points are trusted: both lie before the change
+  t.assert((await enfFetch(path, 'admin', create(1000))).status === 200)
+  t.assert((await enfFetch(path, 'admin', create(3000))).status === 200)
+  permTable.reader = { document: docPerms({ history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+  permTable.bounded = { document: docPerms({ history: { from: 2000, version: 'crud' }, endpoint: { '*': 'crud' } }) }
+  permTable.creator = { document: docPerms({ history: { from: 0, version: 'c---' }, endpoint: { '*': 'crud' } }) }
+  permTable.updater = { document: docPerms({ history: { from: 0, version: '--u-' }, endpoint: { '*': 'crud' } }) }
+  permTable.upserter = { document: docPerms({ history: { from: 0, version: 'c-u-' }, endpoint: { '*': 'crud' } }) }
+  permTable.gated = { document: docPerms({ history: { from: 0, version: 'crud' }, endpoint: { '*': 'crud', version: '-r--' } }) }
+  await t.groupAsync('history without the version grant', async () => {
+    const denied = await enfFetch(path, 'reader')
+    t.assert(denied.status === 403)
+    t.compare((await decodeResponse(denied)).required, docPerms({ history: { from: 0, version: '-r--' } }))
+    const plain = await decodeResponse(await enfFetch(activity, 'reader'))
+    t.assert(plain.activity.length === 1 && plain.activity[0].version === undefined, 'the activity silently leaves the versions out')
+    const explicit = await enfFetch(`${activity}&versions=true`, 'reader')
+    t.assert(explicit.status === 403)
+    t.compare((await decodeResponse(explicit)).required, docPerms({ history: { from: 0, version: '-r--' } }))
+    const full = await decodeResponse(await enfFetch(activity, 'admin'))
+    t.compare(full.activity.map((/** @type {any} */ a) => a.version?.name ?? null), ['v', 'v', null], 'a reader with the grant gets them')
+  })
+  await t.groupAsync('a bounded ray: reads clamp, writes refuse', async () => {
+    t.compare((await decodeResponse(await enfFetch(path, 'bounded'))).versions.map((/** @type {any} */ v) => v.t), [3000])
+    t.compare((await decodeResponse(await enfFetch(activity, 'bounded'))).activity.map((/** @type {any} */ a) => a.to).slice(0, 1), [3000])
+    t.assert((await enfFetch(path, 'bounded', create(1500))).status === 403)
+    t.assert((await enfFetch(path, 'bounded', put(1000))).status === 403)
+    t.assert((await enfFetch(path, 'bounded', await patch(1000))).status === 403)
+    t.assert((await enfFetch(path, 'bounded', await patch(3000))).status === 200)
+    t.assert((await enfFetch(`${path}?t=1000&updatedAt=${await updatedAt(1000)}`, 'bounded', { method: 'DELETE' })).status === 403)
+    t.assert((await enfFetch(path, 'bounded', create(2500))).status === 200)
+    t.assert((await enfFetch(path, 'bounded', create(undefined))).status === 200, 'the default point - the last update - lies within the ray')
+  })
+  await t.groupAsync('the mask is positional', async () => {
+    t.assert((await enfFetch(path, 'creator', create(4000))).status === 200)
+    t.assert((await enfFetch(path, 'creator')).status === 403)
+    // put creates or replaces - whichever it does, it needs both
+    const creatorPut = await enfFetch(path, 'creator', put(4000))
+    t.assert(creatorPut.status === 403)
+    t.compare((await decodeResponse(creatorPut)).required, docPerms({ history: { from: 4000, version: 'c-u-' } }))
+    t.assert((await enfFetch(path, 'updater', put(4000))).status === 403)
+    // patch only ever updates - `u` alone
+    const creatorPatch = await enfFetch(path, 'creator', await patch(4000))
+    t.assert(creatorPatch.status === 403)
+    t.compare((await decodeResponse(creatorPatch)).required, docPerms({ history: { from: 4000, version: '--u-' } }))
+    t.assert((await enfFetch(path, 'updater', await patch(4000))).status === 200)
+    t.assert((await enfFetch(path, 'upserter', put(4000))).status === 200)
+    t.assert((await enfFetch(path, 'upserter', put(4500))).status === 200)
+    const gated = await enfFetch(path, 'gated', create(5000))
+    t.assert(gated.status === 403, 'the endpoint facet gates the route before the handler')
+    t.compare((await decodeResponse(gated)).required, docPerms({ endpoint: { version: 'c---' } }))
+  })
+  await t.groupAsync('writing a version needs an identity, deleting one does not', async () => {
+    const anonFetch = (/** @type {string} */ p, /** @type {RequestInit} */ init = {}) => fetch(`http://${enfHost}/api${p}`, init)
+    permTable.anonymous = { document: docPerms({ history: { from: 0 }, endpoint: { '*': 'crud' } }) }
+    const refused = await anonFetch(path, create(undefined))
+    t.assert(refused.status === 403, 'permission before identity')
+    t.compare((await decodeResponse(refused)).required, docPerms({ history: { from: Number.MAX_SAFE_INTEGER, version: 'c---' } }), 'nothing is read on behalf of a caller that may not create versions')
+    permTable.anonymous = { document: docPerms({ history: { from: 0, version: 'crud' }, endpoint: { '*': 'crud' } }) }
+    const anon = await anonFetch(path, create(6000))
+    t.assert(anon.status === 401 && (await decodeResponse(anon)).code === 'unauthenticated')
+    t.assert((await anonFetch(path, put(1000))).status === 401)
+    t.assert((await anonFetch(path, await patch(1000))).status === 401)
+    t.assert((await anonFetch(`${path}?t=1000&updatedAt=${await updatedAt(1000)}`, { method: 'DELETE' })).status === 204)
+    t.assert((await anonFetch(path)).status === 200)
+  })
+}
+
+/**
+ * `history.publish` gates the `published` flag of named versions: without it an explicit flag is
+ * ignored, and a published version is frozen - PUT, PATCH and DELETE of it are refused.
+ *
+ * @param {t.TestCase} tc
+ */
+export const testVersionPublishing = async tc => {
+  resetPermTable()
+  permTable.editor = { document: docPerms({ history: { from: 0, version: 'crud' }, endpoint: { '*': 'crud' } }) }
+  permTable.publisher = { document: docPerms({ history: { from: 0, version: 'crud', publish: true }, endpoint: { '*': 'crud' } }) }
+  const { org } = await utils.createTestCase(tc)
+  const path = `/version/v1/${org}/${tc.testName}-index`
+  const send = (/** @type {string} */ user, /** @type {string} */ method, /** @type {object} */ body) => enfFetch(path, user, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const read = async (/** @type {number} */ t) => (await decodeResponse(await enfFetch(`${path}?from=${t}&to=${t}`, 'publisher'))).versions[0]
+  const v = (/** @type {number} */ t, extra = {}) => ({ type: 'version:v1', t, name: 'v', ...extra })
+  await t.groupAsync('without history.publish an explicit flag is ignored', async () => {
+    const created = await decodeResponse(await send('editor', 'POST', v(1000, { published: true })))
+    t.assert(created.published === false && created.publishedAt === null && created.publishedBy === null)
+    const patched = await decodeResponse(await send('editor', 'PATCH', v(1000, { published: true, updatedAt: created.updatedAt })))
+    t.assert(patched.published === false && patched.updatedAt > created.updatedAt, 'the rest of the write goes through')
+  })
+  await t.groupAsync('a publisher publishes', async () => {
+    const published = await decodeResponse(await send('publisher', 'PATCH', v(1000, { published: true, updatedAt: (await read(1000)).updatedAt })))
+    t.assert(published.published === true && published.publishedBy === 'publisher' && published.publishedAt != null)
+  })
+  await t.groupAsync('a published version is frozen for everyone else', async () => {
+    const current = await read(1000)
+    for (const res of [
+      await send('editor', 'PUT', v(1000)),
+      await send('editor', 'PATCH', v(1000, { updatedAt: current.updatedAt })),
+      await enfFetch(`${path}?t=1000&updatedAt=${current.updatedAt}`, 'editor', { method: 'DELETE' })
+    ]) {
+      t.assert(res.status === 403)
+      t.compare((await decodeResponse(res)).required, docPerms({ history: { from: 1000, publish: true } }))
+    }
+    t.compare(await read(1000), current, 'nothing was written')
+    t.assert((await send('editor', 'PATCH', v(1000, { updatedAt: current.updatedAt - 1 }))).status === 409, 'a stale write is a conflict first')
+  })
+  await t.groupAsync('the publisher writes it - an omitted flag keeps it published', async () => {
+    const renamed = await decodeResponse(await send('publisher', 'PUT', v(1000, { name: 'renamed' })))
+    t.assert(renamed.name === 'renamed' && renamed.published === true && renamed.publishedBy === 'publisher')
+    const unpublished = await decodeResponse(await send('publisher', 'PATCH', v(1000, { published: false, updatedAt: renamed.updatedAt })))
+    t.assert(unpublished.published === false && unpublished.publishedAt === null && unpublished.publishedBy === null)
+    t.assert((await send('editor', 'PATCH', v(1000, { updatedAt: unpublished.updatedAt }))).status === 200, 'unpublished, the editor may write it again')
+    const created = await decodeResponse(await send('publisher', 'POST', v(2000, { published: true })))
+    t.assert((await enfFetch(`${path}?t=2000&updatedAt=${created.updatedAt}`, 'publisher', { method: 'DELETE' })).status === 204, 'the publisher deletes a published version')
+  })
+}
+
+/**
  * Anonymous callers (`authenticate` → null) are authorized like anyone else: reads, presence,
  * history and deletion work on a grant, and a missing grant is 403 - never 401. Writing the
  * document is the exception - attributions carry the userid - and it is refused with 401 only

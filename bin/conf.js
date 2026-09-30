@@ -66,7 +66,7 @@ export const conf = {
           type: 'permissions:document:v1',
           ydoc: 'cru-',
           awareness: '-ru-',
-          history: { from: 0, rollback: true, prune: true },
+          history: { from: 0, rollback: true, prune: true, version: 'crud', publish: true },
           delete: ['soft'],
           endpoint: { '*': 'crud' }
         })

@@ -111,7 +111,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       break
     }
     case 'activity': {
-      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupByUser, groupMaxGap, groupMaxDuration, groupExclude } = msg
+      const { nongcDoc: nongcDocBin, contentmapBin, from, to, by, contentIds: contentIdsBin, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupByUser, groupMaxGap, groupMaxDuration, groupExclude, versions } = msg
       const contentmap = Y.decodeContentMap(contentmapBin)
       const contentIds = contentIdsBin && Y.decodeContentIds(contentIdsBin)
       const filteredAttributions = filterContentMap(contentmap, from, to, by || undefined, contentIds, withCustomAttributions)
@@ -160,10 +160,14 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         }
       })
       activity.sort((a, b) => a.from - b.from)
-      /** @type {Array<{ from: number, to: number, by: string|null|Array<string|null>, delta?: any, attributions?: Uint8Array<ArrayBuffer>, renderedContent?: Uint8Array<ArrayBuffer>, customAttributions: Array<{k:string,v:string}>|null }>} */
+      /** @type {Array<{ from: number, to: number, by: string|null|Array<string|null>, delta?: any, attributions?: Uint8Array<ArrayBuffer>, renderedContent?: Uint8Array<ArrayBuffer>, customAttributions: Array<{k:string,v:string}>|null, version?: import('./types.js').Version, isEmpty?: boolean }>} */
       const activityResult = []
       const groupDistance = group ? groupMaxGap : 1
-      /** @type {{ from: number, to: number, by: string|null|Array<string|null>, customAttributions: Array<{k:string,v:string}>|null }|null} */
+      /**
+       * The open entry - changes may still merge into it. `null` after a named version closed it.
+       *
+       * @type {{ from: number, to: number, by: string|null|Array<string|null>, customAttributions: Array<{k:string,v:string}>|null, version?: import('./types.js').Version }|null}
+       */
       let lastActivity = null
       // the previous change's author - with `groupByUser:false` an entry's `by` is its author list,
       // so it can no longer answer "who wrote the change before this one"
@@ -172,7 +176,30 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
       // the open entry's author list (`groupByUser:false` only)
       /** @type {Array<string|null>?} */
       let byList = null
+      // the first named version that is not applied yet
+      let vi = 0
+      /**
+       * Apply every named version before `t` - strictly: a change at exactly the time of a version
+       * belongs to it. A version closes the open entry at its time, whatever the gap, so no entry
+       * spans it; with no change since the previous cut it is an entry of its own, flagged
+       * `isEmpty`. Filters never hide a version.
+       *
+       * @param {number} t
+       */
+      const cutVersions = t => {
+        while (vi < versions.length && versions[vi].t < t) {
+          const version = versions[vi++]
+          if (lastActivity != null) {
+            lastActivity.to = version.t
+            lastActivity.version = version
+            lastActivity = null
+          } else {
+            activityResult.push({ from: version.t, to: version.t, by: groupByUser ? null : [], customAttributions: includeCustomAttributions ? [] : null, version, isEmpty: true })
+          }
+        }
+      }
       activity.forEach(act => {
+        cutVersions(act.from)
         // a groupExclude'd user never merges in either direction - null authors are never excludable
         const excluded = (act.by != null && groupExclude.includes(act.by)) || (lastBy != null && groupExclude.includes(lastBy))
         if (lastActivity != null && !excluded && (!groupByUser || lastBy === act.by) && act.from - lastActivity.to < groupDistance && act.to - lastActivity.from < groupMaxDuration) {
@@ -186,6 +213,7 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         }
         lastBy = act.by
       })
+      cutVersions(Infinity)
       if (includeCustomAttributions) {
         // the result entries, not `activity`: with `groupByUser:false` a group head is a copy, and
         // this reassigns `customAttributions` rather than mutating it in place
@@ -256,8 +284,9 @@ port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg =>
         doc.destroy()
       }
       const encoder = encoding.createEncoder()
-      // response is always `{ activity, ydoc? }` — the top-level shape is stable regardless of `ydoc`
-      encoding.writeAny(encoder, includeYdoc ? { ydoc: ydocOut, activity: activityResult } : { activity: activityResult })
+      // response is always `{ activity, ydoc? }` — the top-level shape is stable regardless of `ydoc`.
+      // A version's `custom` is typed `any`, which the encodable type doesn't admit
+      encoding.writeAny(encoder, /** @type {any} */ (includeYdoc ? { ydoc: ydocOut, activity: activityResult } : { activity: activityResult }))
       const result = encoding.toUint8Array(encoder)
       port.postMessage(result, [result.buffer])
       break

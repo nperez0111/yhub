@@ -35,7 +35,7 @@ const yhub = await createYHub({
           type: 'permissions:document:v1',
           ydoc: 'cru-',      // positional crud mask, '-' denies: r = read/sync, u = write (c/d reserved, do nothing yet)
           awareness: '-ru-', // r = receive presence, u = broadcast own (c/d reserved)
-          history: { from: 0, rollback: true, prune: false }, // from = 0 grants full history
+          history: { from: 0, rollback: true, prune: false, version: 'crud' }, // from = 0 grants full history, version: named versions
           delete: ['soft'],  // destructive rights are opted into by name — never implied by a write mask
           endpoint: { '*': '-r--', comments: 'crud' } // rest endpoints + the websocket route ('ws'), '*' = fallback
         })

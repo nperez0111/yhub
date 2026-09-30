@@ -19,7 +19,7 @@ import { encodeRoomName } from '../src/stream.js'
 // as much as the document table: document ids are deterministic per test, so a tombstone left behind
 // by one run would 404 that docid on every later run, restarts included.
 const sql = postgres(env.ensureConf('postgres-testing'))
-for (const table of ['yhub_ydoc_v1', 'yhub_ydoc_tombstones_v1']) {
+for (const table of ['yhub_ydoc_v1', 'yhub_ydoc_tombstones_v1', 'yhub_ydoc_versions_v1']) {
   await sql`DELETE from ${sql(table)}`
 }
 
@@ -125,7 +125,7 @@ const testApiSpecs = [
     patch: { handler: async req => ({ bodyIsUndefined: req.body === undefined, received: await req.any() }) }
   }),
   // json response shaping: binary → base64, Date → epoch millis, undefined → null (key preserved)
-  { name: 'jsonshape', get: { handler: async () => ({ bin: new Uint8Array([1, 2, 254]), buf: Buffer.from([4, 5]), when: new Date(1700000000000), missing: undefined, nested: { deep: new Uint8Array([9]) }, list: [new Uint8Array([7])] }) } },
+  { name: 'jsonshape', get: { handler: async () => ({ bin: new Uint8Array([1, 2, 254]), buf: Buffer.from([4, 5]), when: new Date(1700000000000), big: 12345678901234567890n, missing: undefined, nested: { deep: new Uint8Array([9]) }, list: [new Uint8Array([7])] }) } },
   // pre-encoded lib0-any bytes: served as x-lib0any, transcoded to json on request
   { name: 'preenc', get: { handler: async () => encodedAny(buffer.encodeAny({ a: 1, bin: new Uint8Array([1, 2]) })) } },
   // a declared `branch` attribute constrains the requested branch - the server default 'main' is
@@ -184,7 +184,7 @@ export const yhub = await createYHub({
           type: 'permissions:document:v1',
           ydoc: 'crud',
           awareness: 'crud',
-          history: { from: 0, rollback: true, prune: true },
+          history: { from: 0, rollback: true, prune: true, version: 'crud', publish: true },
           delete: ['soft', 'hard'],
           endpoint: { '*': 'crud' }
         }),

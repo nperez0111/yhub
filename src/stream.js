@@ -115,6 +115,14 @@ export const isSmallerRedisClock = (a, b) => {
 export const maxRedisClock = (a, b) => isSmallerRedisClock(a, b) ? b : a
 
 /**
+ * The unix ms of a redis clock (`${ms}-${seq}`) - `yhub_ydoc_v1.created` of a row stamped with it.
+ *
+ * @param {string} clock
+ * @return {number}
+ */
+export const redisClockToMs = clock => number.parseInt(clock.split('-')[0])
+
+/**
  * @param {string} a
  * @param {string} b
  * @return {string}

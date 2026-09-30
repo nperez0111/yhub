@@ -80,4 +80,7 @@ jobs:
         run: node --env-file .env ./bin/init-db.js
 
       - name: Run tests
+        # an explicit `shell: bash` runs with `-o pipefail` - the default shell doesn't, so a failing
+        # test run piped into pino-pretty would pass the step
+        shell: bash
         run: node --expose-gc --max-old-space-size=8192 --env-file .env tests/index.js | npx pino-pretty -S -L debug

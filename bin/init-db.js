@@ -64,6 +64,27 @@ const initTables = async sql => {
     CREATE INDEX IF NOT EXISTS yhub_ydoc_tombstones_v1_pending
     ON yhub_ydoc_tombstones_v1 (deleted_at) WHERE purged_at IS NULL
   `
+  // named versions: `t` is a unix ms point in the document's history, the primary key serves the
+  // range scan of the version and activity endpoints. `custom` is the client's lib0-any encoded
+  // data; `created_at`/`updated_at` are redis TIME, like the tombstones' `deleted_at`
+  await sql`
+    CREATE TABLE IF NOT EXISTS yhub_ydoc_versions_v1 (
+        org             text,
+        docid           text,
+        branch          text,
+        t               INT8,
+        name            text NOT NULL,
+        custom          bytea NOT NULL,
+        published       boolean NOT NULL DEFAULT false,
+        published_at    INT8,
+        published_by    text,
+        created_at      INT8 NOT NULL,
+        updated_at      INT8 NOT NULL,
+        created_by      text,
+        updated_by      text,
+        PRIMARY KEY     (org,docid,branch,t)
+    )
+  `
 }
 
 /**

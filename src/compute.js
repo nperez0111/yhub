@@ -62,7 +62,11 @@ const $computeTask = s.$union(
     groupByUser: s.$boolean,
     groupMaxGap: s.$number,
     groupMaxDuration: s.$number,
-    groupExclude: s.$array(s.$string)
+    groupExclude: s.$array(s.$string),
+    // named versions in the window, sorted by `t`. Only `t` is checked: the rows were validated
+    // when they were written, and checking the whole shape here would fail reads of rows that a
+    // newer release wrote (a rolling deploy, a downgrade)
+    versions: s.$array(/** @type {s.Schema<import('./types.js').Version>} */ (s.$object({ t: s.$number })))
   }),
   s.$object({
     type: s.$literal('rollback'),
@@ -359,6 +363,7 @@ class ComputePool {
    * @param {number} opts.groupMaxGap
    * @param {number} opts.groupMaxDuration
    * @param {Array<string>} opts.groupExclude
+   * @param {Array<import('./types.js').Version>} opts.versions named versions in [from, to], sorted by `t`
    * @param {Object<string, any>} [logContext]
    * @returns {Promise<Uint8Array<ArrayBuffer>>}
    */

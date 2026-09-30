@@ -142,6 +142,7 @@ export const testActivityGrouping = async _tc => {
     groupMaxGap: 1000,
     groupMaxDuration: Number.MAX_SAFE_INTEGER,
     groupExclude: [],
+    versions: [],
     ...opts
   }))).activity
   // default: 500ms gaps are below groupMaxGap=1000, everything merges
@@ -216,6 +217,7 @@ export const testActivityGroupByUser = async _tc => {
     groupMaxGap: 1000,
     groupMaxDuration: Number.MAX_SAFE_INTEGER,
     groupExclude: [],
+    versions: [],
     ...opts
   }))).activity
   // grouping by user: the author changes on every edit, so nothing merges and `by` stays scalar
@@ -231,6 +233,121 @@ export const testActivityGroupByUser = async _tc => {
   t.compare((await activity({ groupByUser: false, groupExclude: ['user2'] })).map(a => [a.from, a.to, a.by]), [[1000, 1000, ['user1']], [1500, 1500, ['user2']], [2000, 2000, ['user1']]])
   // custom attributions of a cross-author group are still combined and deduplicated
   t.compare((await activity({ groupByUser: false, includeCustomAttributions: true })).map(a => a.customAttributions), [[{ k: 'source', v: 'import' }]])
+  doc.destroy()
+  await pool.destroy()
+}
+
+/**
+ * Named versions cut the activity: no entry spans a version, the entry holding the last change up
+ * to (and including) the time of a version ends at it and carries it, and a version without a
+ * change since the previous cut is an entry of its own. Filters never hide a version.
+ *
+ * @param {t.TestCase} _tc
+ */
+export const testActivityNamedVersions = async _tc => {
+  const pool = createComputePool({ poolSize: 2 })
+  const doc = new Y.Doc({ gc: false })
+  // three interleaved edits: user1@1000 'hello', user2@1500 ' world', user1@2000 '!'
+  doc.get('test').insert(0, 'hello')
+  const contentIds1 = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(doc))
+  const contentmap1 = Y.createContentMapFromContentIds(
+    contentIds1,
+    [Y.createContentAttribute('insert', 'user1'), Y.createContentAttribute('insertAt', 1000)],
+    [Y.createContentAttribute('delete', 'user1'), Y.createContentAttribute('deleteAt', 1000)]
+  )
+  doc.get('test').insert(5, ' world')
+  const contentIds2 = Y.createContentIdsFromUpdate(Y.encodeStateAsUpdate(doc))
+  const contentmap2 = Y.createContentMapFromContentIds(
+    Y.excludeContentIds(contentIds2, contentIds1),
+    [Y.createContentAttribute('insert', 'user2'), Y.createContentAttribute('insertAt', 1500)],
+    [Y.createContentAttribute('delete', 'user2'), Y.createContentAttribute('deleteAt', 1500)]
+  )
+  doc.get('test').insert(11, '!')
+  const nongcDoc = Y.encodeStateAsUpdate(doc)
+  const contentmap3 = Y.createContentMapFromContentIds(
+    Y.excludeContentIds(Y.createContentIdsFromUpdate(nongcDoc), contentIds2),
+    [Y.createContentAttribute('insert', 'user1'), Y.createContentAttribute('insertAt', 2000)],
+    [Y.createContentAttribute('delete', 'user1'), Y.createContentAttribute('deleteAt', 2000)]
+  )
+  const contentmapBin = Y.encodeContentMap(Y.mergeContentMaps([contentmap1, contentmap2, contentmap3]))
+  /**
+   * @param {number} t
+   * @param {string} name
+   */
+  const v = (t, name) => /** @type {import('../src/types.js').Version} */ ({ type: 'version:v1', t, name, createdAt: 1, updatedAt: 1, createdBy: 'user1', updatedBy: 'user1', custom: { tags: [name] }, published: false, publishedAt: null, publishedBy: null })
+  /**
+   * @param {object} opts
+   * @return {Promise<Array<{ from: number, to: number, by: string|null|Array<string?>, customAttributions: Array<{k:string,v:string}>|null, version?: any, isEmpty?: boolean, delta?: any, attributions?: Uint8Array<ArrayBuffer> }>>}
+   */
+  const activity = async (opts = {}) => decoding.readAny(decoding.createDecoder(await pool.activity({
+    nongcDoc,
+    contentmapBin,
+    from: 0,
+    to: Number.MAX_SAFE_INTEGER,
+    by: '',
+    withCustomAttributions: null,
+    includeCustomAttributions: false,
+    includeDelta: false,
+    includeYdoc: false,
+    includeAttributions: false,
+    limit: Number.MAX_SAFE_INTEGER,
+    reverse: false,
+    group: true,
+    groupByUser: false,
+    groupMaxGap: 1000,
+    groupMaxDuration: Number.MAX_SAFE_INTEGER,
+    groupExclude: [],
+    versions: [],
+    ...opts
+  }))).activity
+  /**
+   * @param {Awaited<ReturnType<typeof activity>>} entries
+   */
+  const summary = entries => entries.map(a => [a.from, a.to, a.by, a.version?.name ?? null])
+  // without versions everything merges into one entry
+  t.compare(summary(await activity({})), [[1000, 2000, ['user1', 'user2'], null]])
+  // a version between two changes closes the entry at its time
+  t.compare(summary(await activity({ versions: [v(1200, 'a')] })), [[1000, 1200, ['user1'], 'a'], [1500, 2000, ['user2', 'user1'], null]])
+  // a change at exactly the time of a version belongs to it
+  t.compare(summary(await activity({ versions: [v(1500, 'a')] })), [[1000, 1500, ['user1', 'user2'], 'a'], [2000, 2000, ['user1'], null]])
+  // a version before the first change, and consecutive versions, are entries of their own
+  t.compare(summary(await activity({ versions: [v(500, 'a')] })), [[500, 500, [], 'a'], [1000, 2000, ['user1', 'user2'], null]])
+  t.compare(summary(await activity({ versions: [v(1200, 'a'), v(1300, 'b')] })), [[1000, 1200, ['user1'], 'a'], [1300, 1300, [], 'b'], [1500, 2000, ['user2', 'user1'], null]])
+  // an entry of a version alone is flagged, every other entry isn't
+  t.compare((await activity({ versions: [v(500, 'a')] })).map(a => a.isEmpty), [true, undefined])
+  t.compare((await activity({ versions: [v(1200, 'a'), v(1300, 'b')] })).map(a => a.isEmpty), [undefined, true, undefined])
+  // a version attaches to the previous entry however far past groupMaxGap it lies
+  const far = await activity({ groupMaxGap: 1000, versions: [v(100000, 'a')] })
+  t.compare(summary(far), [[1000, 100000, ['user1', 'user2'], 'a']])
+  t.assert(far[0].isEmpty === undefined)
+  // trailing versions: the first extends the open entry, the rest stand alone
+  t.compare(summary(await activity({ versions: [v(3000, 'a'), v(4000, 'b')] })), [[1000, 3000, ['user1', 'user2'], 'a'], [4000, 4000, [], 'b']])
+  // the version object is delivered as stored
+  t.compare((await activity({ versions: [v(3000, 'a')] }))[0].version, v(3000, 'a'))
+  // stored rows are not re-validated on read - a row written by a newer release passes through
+  const future = /** @type {any} */ ({ type: 'version:v2', t: 3000, label: 'b' })
+  t.compare((await activity({ versions: [future] }))[0].version, future)
+  // filters never hide a version - with nothing matching before it, it stands alone
+  t.compare(summary(await activity({ groupByUser: true, by: 'user2', versions: [v(1200, 'a')] })), [[1200, 1200, null, 'a'], [1500, 1500, 'user2', null]])
+  t.compare(summary(await activity({ groupByUser: true, by: 'user2', versions: [v(1700, 'a')] })), [[1500, 1700, 'user2', 'a']])
+  // an empty entry carries empty custom attributions when they are asked for
+  t.compare((await activity({ includeCustomAttributions: true, versions: [v(500, 'a')] })).map(a => a.customAttributions), [[], []])
+  t.compare((await activity({ versions: [v(500, 'a')] })).map(a => a.customAttributions), [null, null])
+  // the duration bound still applies to the changes; only the reported `to` extends
+  t.compare(summary(await activity({ groupMaxGap: 10000, groupMaxDuration: 600, versions: [v(3000, 'a')] })), [[1000, 1500, ['user1', 'user2'], null], [2000, 3000, ['user1'], 'a']])
+  // order and limit count version entries
+  t.compare(summary(await activity({ reverse: true, limit: 1, versions: [v(3000, 'a'), v(4000, 'b')] })), [[4000, 4000, [], 'b']])
+  // rendered: a cut entry is the document at the version's time with its own changes attributed,
+  // an empty entry is the document at its time with nothing attributed
+  const rendered = await activity({ includeDelta: true, includeAttributions: true, versions: [v(500, 'a'), v(1200, 'b')] })
+  /**
+   * @param {any} d
+   */
+  const text = d => (d.children ?? []).map((/** @type {any} */ c) => c.insert ?? '').join('')
+  t.compare(rendered.map(a => text(a.delta)), ['', 'hello', 'hello world!'])
+  const attributed = rendered.map(a => Y.createContentIdsFromContentMap(Y.decodeContentMap(/** @type {Uint8Array<ArrayBuffer>} */ (a.attributions))).inserts)
+  t.assert(attributed[0].isEmpty())
+  t.assert(Y.diffIdSet(attributed[1], contentIds1.inserts).isEmpty() && Y.diffIdSet(contentIds1.inserts, attributed[1]).isEmpty())
   doc.destroy()
   await pool.destroy()
 }

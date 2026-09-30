@@ -131,7 +131,11 @@ export const $documentPermissionsV1 = s.$object({
   history: $deniable(s.$object({
     from: s.$uint,
     rollback: s.$boolean.optional,
-    prune: s.$boolean.optional
+    prune: s.$boolean.optional,
+    // crud over the named versions within the ray - their metadata, never their content
+    version: $deniable($crud).optional,
+    // may set a named version's `published` flag, and write published versions (frozen otherwise)
+    publish: s.$boolean.optional
   })).optional,
   delete: $deniable(s.$array(s.$union(s.$literal('soft'), s.$literal('hard')))).optional,
   endpoint: $deniable($endpointFacet).optional
@@ -213,7 +217,7 @@ export const sanitizePermissions = permissions => $permissions.expect(withoutPro
  * @property {'permissions:document:v1'} DocumentPermissionsV1Normalized.type
  * @property {CRUD} DocumentPermissionsV1Normalized.ydoc
  * @property {CRUD} DocumentPermissionsV1Normalized.awareness
- * @property {false | { from: number, rollback: boolean, prune: boolean }} DocumentPermissionsV1Normalized.history
+ * @property {false | { from: number, rollback: boolean, prune: boolean, version: CRUD, publish: boolean }} DocumentPermissionsV1Normalized.history
  * @property {false | Array<'soft'|'hard'>} DocumentPermissionsV1Normalized.delete
  * @property {{ [name: string]: CRUD }} DocumentPermissionsV1Normalized.endpoint
  */
@@ -237,7 +241,7 @@ const createNormalizedDocumentPermissions = p => {
   const canUpdate = n.ydoc[2] === 'u'
   const history = p.history
   n.history = history
-    ? { from: history.from, rollback: (canUpdate && history.rollback) || false, prune: (canUpdate && history.prune) || false }
+    ? { from: history.from, rollback: (canUpdate && history.rollback) || false, prune: (canUpdate && history.prune) || false, version: history.version || '----', publish: history.publish || false }
     : false
   n.delete = (p.delete && p.delete.length > 0) ? Array.from(new Set(p.delete)).sort() : false
   n.endpoint = canonicalEndpointMap(p.endpoint || {})
@@ -452,14 +456,16 @@ export const documentPermissionsUnion = (docperm1, docperm2) => ({
   type: assertSameType(docperm1, docperm2),
   ydoc: deniableUnion(docperm1.ydoc, docperm2.ydoc, crudUnion),
   awareness: deniableUnion(docperm1.awareness, docperm2.awareness, crudUnion),
-  // single-ray model: `rollback`/`prune` are doc-wide booleans over one `from` ray, so a union
-  // widens them to the wider (min) ray - composing {full-history reader, no rollback} with
-  // {rollback from X} yields rollback from the epoch. Acceptable for v1; revisit with per-boolean
-  // rays (`rollbackFrom`/`pruneFrom`) if roles must compose without widening.
+  // single-ray model: `rollback`/`prune`/`version`/`publish` are doc-wide grants over one `from`
+  // ray, so a union widens them to the wider (min) ray - composing {full-history reader, no
+  // rollback} with {rollback from X} yields rollback from the epoch. Acceptable for v1; revisit
+  // with per-grant rays (`rollbackFrom`/`pruneFrom`) if roles must compose without widening.
   history: deniableUnion(docperm1.history, docperm2.history, (h1, h2) => ({
     from: math.min(h1.from, h2.from),
     prune: deniableUnion(h1.prune, h2.prune, (p1, p2) => p1 || p2),
-    rollback: deniableUnion(h1.rollback, h2.rollback, (r1, r2) => r1 || r2)
+    rollback: deniableUnion(h1.rollback, h2.rollback, (r1, r2) => r1 || r2),
+    version: deniableUnion(h1.version, h2.version, crudUnion),
+    publish: deniableUnion(h1.publish, h2.publish, (p1, p2) => p1 || p2)
   })),
   delete: deniableUnion(docperm1.delete, docperm2.delete, (d1, d2) => Array.from(new Set([...d1, ...d2]))),
   endpoint: deniableUnion(docperm1.endpoint, docperm2.endpoint, (e1, e2) => mergeEndpointFacets(e1, e2, (a, b) => deniableUnion(a, b, crudUnion)))
@@ -478,7 +484,9 @@ export const documentPermissionsIntersect = (docperm1, docperm2) => ({
     // the more restrictive ray survives an intersection
     from: math.max(h1.from, h2.from),
     prune: deniableIntersect(h1.prune, h2.prune, (p1, p2) => p1 && p2),
-    rollback: deniableIntersect(h1.rollback, h2.rollback, (r1, r2) => r1 && r2)
+    rollback: deniableIntersect(h1.rollback, h2.rollback, (r1, r2) => r1 && r2),
+    version: deniableIntersect(h1.version, h2.version, crudIntersect),
+    publish: deniableIntersect(h1.publish, h2.publish, (p1, p2) => p1 && p2)
   })),
   delete: deniableIntersect(docperm1.delete, docperm2.delete, (d1, d2) => d1.filter(p => d2.includes(p))),
   endpoint: deniableIntersect(docperm1.endpoint, docperm2.endpoint, (e1, e2) => mergeEndpointFacets(e1, e2, (a, b) => deniableIntersect(a, b, crudIntersect)))
@@ -572,10 +580,10 @@ const assertValidRequirement = (required, type) => {
   // the closure can launder it
   $permissionsSchemaFor(type).expect(required)
   // `history` is the only nested fixed-shape facet; the schema ignores unknown keys, so a typo'd
-  // sub-key (`rollbck`) would silently drop the intended rollback/prune requirement
+  // sub-key (`rollbck`) would silently drop the intended rollback/prune/version/publish requirement
   if (required.history != null && typeof required.history === 'object') {
     object.forEach(required.history, (_v, k) => {
-      if (k !== 'from' && k !== 'rollback' && k !== 'prune') throw error.create(`invalid history requirement key '${k}'`)
+      if (k !== 'from' && k !== 'rollback' && k !== 'prune' && k !== 'version' && k !== 'publish') throw error.create(`invalid history requirement key '${k}'`)
     })
   }
 }

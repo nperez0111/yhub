@@ -28,7 +28,8 @@ permission inheritance between scopes — an org- or branch-level answer never i
 about a document (relations come later); creation gating (`createMain`/`createBranch` — v1 keeps
 today's semantics: a write with `ydoc: 'rw'` to a nonexistent document creates it); cross-branch
 delete; bulk checking, enumeration, and the v2 multi-doc sync (§10); the tag store (§11);
-subdocuments (naming.md §5); `explainPermissions`.
+subdocuments (naming.md §5); `explainPermissions`; reading a named version's content without
+ydoc `r` or a history ray (a separate grant, never a widened `history.version` `r`).
 
 ## 1. Concept
 
@@ -121,7 +122,7 @@ default `'main'`). This type replaces the earlier working names "RoomPermissions
   type:      'permissions:document:v1',
   ydoc:      CRUD | false,        // positional mask, e.g. 'cru-'
   awareness: CRUD | false,
-  history:   { from: uint, rollback?: boolean, prune?: boolean } | false,
+  history:   { from: uint, rollback?: boolean, prune?: boolean, version?: CRUD | false, publish?: boolean } | false,
   delete:    Array<'soft'|'hard'> | false,
   endpoint:  { [name]: CRUD | false } | false    // may contain '*', the fallback entry
 }
@@ -146,6 +147,8 @@ Facet semantics and the exact gate each one owns:
 | `history.from` | read attributed history from `from` onward (0 = full) | `changeset`/`activity`: bounds clamped **before** the cache key (§9); `?ydoc=`/`?delta=` additionally require ydoc `r` (§9.7); `gc=false` requires `from: 0` (§9) |
 | `history.rollback` | revert doc content | `POST /rollback`; requested range must be ⊆ the granted ray (§9) |
 | `history.prune` | destroy history permanently | `POST /prune`; same containment rule |
+| `history.version` | crud over the named versions within the ray (annotated points of the history) — metadata only; content at a version stays behind ydoc `r` + the ray (§9.7) | `GET /version` and the activity's `?versions=` clamp to the ray; `POST`/`PUT`/`DELETE /version` refuse a `t` before it. No implication - a version doesn't write the document |
+| `history.publish` | set a named version's `published` flag, and write published versions | the version writes: an explicit `published` is ignored without it; a published version is frozen - `PUT`/`PATCH`/`DELETE` refuse without it. No implication - it only acts together with a version write, whose bits the handler requires anyway |
 | `delete` contains `'soft'` / `'hard'` | `DELETE /ydoc` (`?hard=true` requires `'hard'`) — this document on this branch | replaces `accessPurpose: 'delete'` — enforced, not advisory. `hard` was previously programmatic-only; granting it over REST is now an explicit permission |
 | `endpointPermission(perms, name)` | call rest endpoints - builtin and custom (§8) | `createApiHandler` |
 | `endpointPermission(perms, 'ws')` | `r`: open the websocket (with ydoc `r`); `u`: submit doc updates over it (with ydoc `u`) | `server.js` upgrade; ws `message` case 0 |
@@ -158,8 +161,8 @@ namespace) are a deferred additive extension. Awareness writes to a nonexistent 
 exempt from any creation gating — presence is ephemeral, and its stream keys age out via
 compaction.
 
-`history` groups everything the history ray must contain — `rollback` and `prune` live inside
-the granted object, so they can never outlive history access. `delete` stays top-level because
+`history` groups everything the history ray must contain — `rollback`, `prune` and `version` live
+inside the granted object, so they can never outlive history access. `delete` stays top-level because
 it destroys the whole document on this branch, not one facet.
 
 The history restriction is a **from-ray**, not a window: `false`/absent (no history) or
@@ -308,7 +311,8 @@ carry the userid. Where an anonymous caller *holds* ydoc `u` and tries to use it
 ordinary 403: `PATCH /ydoc` with an `update`, `POST /rollback`, and the ws upgrade (an anonymous
 socket never holds `u`, so the per-message write gate needs no identity check; the recheck keeps
 the invariant since a newly granted `u` differs from the stored mask). Reads, presence, history,
-prune, and delete (`by: null`) work anonymously when granted.
+prune, and delete (`by: null`) work anonymously when granted. Named versions are attributed too:
+writing one (`POST`/`PUT`/`PATCH /version`) answers 401 to an anonymous caller, deleting one doesn't.
 
 Determinism contract: `authorize` must be deterministic per `(type, resourceId, user)` between
 upgrade and recheck — a plugin computing wall-clock-relative bounds (`from: now - 30d`) at call
@@ -393,7 +397,11 @@ that branch when absent — v1 creation semantics, §3), **checked before the fi
 socket); `DELETE /ydoc` — `delete`
 contains `'soft'`/`'hard'`; `POST /rollback` — `history.rollback` + range containment;
 `POST /prune` — `history.prune` + range containment; `changeset`/`activity` — history granted,
-clamped.
+clamped (named versions ride along on `activity` when `history.version` `r` is granted, and
+`?versions=true` without it is refused); `version` — `history.version` `r` clamped, `c` (POST),
+`u` (PATCH, a conditional update), `c`+`u` (PUT, create or replace) and `d` with the version's `t`
+contained in the ray; `history.publish` to set `published` (ignored without it) and to write a
+published version (refused without it).
 
 ## 9. Enforcement invariants
 
@@ -448,7 +456,7 @@ These are the rules that keep the granular model sound; each has a concrete expl
    socket consumes: the `ydoc` mask, the `awareness` mask, the effective `ws` endpoint mask, and
    — for `gc=false` connections — whether `history.from === 0` still holds. Any difference ⇒
    close 4401 (downgrades *and* upgrades: the frozen view must not silently widen), plugin throw
-   ⇒ 1013. REST-only facets (`delete`, `rollback`, `prune`, the other `endpoint` entries) never
+   ⇒ 1013. REST-only facets (`delete`, `rollback`, `prune`, `version`, `publish`, the other `endpoint` entries) never
    bounce live connections; bounded-ray tweaks
    never bounce `gc=true` connections. (An interned ws projection was designed and dropped — the
    per-connection view is small and a plain three-leaf compare is simpler than any sharing
@@ -615,7 +623,7 @@ without a Zanzibar.
    a `to` permission bound has no product use-case and stays a query parameter (§3).
 2. ~~Unbounded sentinel~~ — resolved: none exists. `from` is a plain unix-ms int; `0` (the
    epoch) is full history. (`history: true` sugar for `{ from: 0 }` was considered and rejected —
-   the schema stays strict: `false | { from, rollback?, prune? }`, one spelling per grant.)
+   the schema stays strict: `false | { from, rollback?, prune?, version?, publish? }`, one spelling per grant.)
 3. ~~Context merge semantics~~ — moot: the endpoint `context` payload was dropped with the
    simplified rewrite (§8).
 4. **Org-/branch-wide recheck** enumeration of active documents (§11).

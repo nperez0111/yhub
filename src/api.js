@@ -13,7 +13,8 @@ const log = logger.child({ module: 'api' })
 
 /**
  * `JSON.stringify` replacer producing the json representation of any-encodable values: binary
- * data as base64, `Date` as epoch millis, `undefined` as `null` (preserving the key). A
+ * data as base64, `Date` as epoch millis, `bigint` as its decimal string (json numbers can't hold
+ * it, and `JSON.stringify` throws on it), `undefined` as `null` (preserving the key). A
  * `function`, not an arrow - `this` is the containing object, so `raw` sees values before their
  * `toJSON` runs (`Buffer` and `Date` would otherwise already be converted).
  *
@@ -25,6 +26,7 @@ const jsonReplacer = function (key, value) {
   const raw = this[key]
   if (raw instanceof Uint8Array) return buffer.toBase64(raw)
   if (raw instanceof Date) return raw.getTime()
+  if (typeof raw === 'bigint') return raw.toString()
   if (raw === undefined) return null // preserve the key
   return value
 }

@@ -51,6 +51,7 @@ All binary data in YHub has an explicit schema with version information. This ap
 | `ydoc:update:v1` | v1 | Y.js update message (Redis) |
 | `ydoc:tombstone:v1` | v1 | Document deletion notice (Redis) |
 | `awareness:v1` | v1 | Awareness protocol message (Redis) |
+| `version:v1` | v1 | Named version (assembled from a `yhub_ydoc_versions_v1` row) |
 | `compact` | current | Document compaction task |
 
 ---
@@ -140,9 +141,45 @@ deliberately unguarded, so compaction keeps persisting what is already on the st
 `purged_at` is set only once the erase actually succeeded, which is what makes a crashed purge
 resumable and the purge safe to re-run.
 
+### Table: `yhub_ydoc_versions_v1`
+
+Named versions — annotations of points in the history of a document (see
+[API.md](./API.md#versions)). Unrelated to the rows of `yhub_ydoc_v1`, which compaction replaces:
+a named version is a unix ms point in the attributed history, rendered from the contentmap like any
+activity entry.
+
+```sql
+CREATE TABLE yhub_ydoc_versions_v1 (
+    org         text,
+    docid       text,
+    branch      text,
+    t           INT8,             -- unix ms, the point in the history (an activity `to`)
+    name        text    NOT NULL,
+    custom      bytea   NOT NULL, -- the client's data, lib0-any encoded
+    published   boolean NOT NULL DEFAULT false, -- reserved for future use
+    published_at INT8,            -- unix ms (redis TIME) of the publication, NULL while unpublished
+    published_by text,
+    created_at  INT8    NOT NULL, -- unix ms (redis TIME), same clock domain as deleted_at
+    updated_at  INT8    NOT NULL,
+    created_by  text,             -- authInfo.userid
+    updated_by  text,
+    PRIMARY KEY (org, docid, branch, t)
+);
+```
+
+Every field is a column and the `version:v1` object is assembled from the row, so the server's
+fields never share a namespace with the client's data (`custom`), and a later release adds a field
+as a column (`ADD COLUMN IF NOT EXISTS`, nullable or with a constant default, so older servers'
+`INSERT`s keep working). Reads don't re-validate stored rows against the object schema - a row a
+newer release wrote must not fail an older server's activity. The primary key serves the range
+scans of the version and activity endpoints. A hard deletion
+erases the named versions of the document in `purgeDoc`, and their `INSERT` carries the same
+`WHERE NOT EXISTS (.. AND d.hard)` barrier as `Persistence.store`; a soft deletion keeps them for a
+restore.
+
 ### Schema creation
 
-Both tables are created by `bin/init-db.js` (`npm run start:init`), which is the only thing in
+All tables are created by `bin/init-db.js` (`npm run start:init`), which is the only thing in
 y/hub that runs DDL. This is a **manual step**, at setup and again when upgrading to a release that
 introduces a table — servers and workers never create tables, so they need no permission to, and a
 schema change happens at a moment the operator picked rather than implicitly during a rolling

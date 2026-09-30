@@ -9,6 +9,7 @@ import * as storage from './storage.tests.js'
 import * as computeWorker from './computeWorker.tests.js'
 import * as agents from './agents.tests.js'
 import * as deleteDoc from './delete.tests.js'
+import * as versions from './versions.tests.js'
 import * as stream from './stream.tests.js'
 import * as worker from './worker.tests.js'
 import * as permissions from './permissions.tests.js'
@@ -32,7 +33,8 @@ runTests({
   auth,
   ws,
   agents,
-  deleteDoc
+  deleteDoc,
+  versions
 }).then(success => {
   process.exit(success ? 0 : 1)
 })

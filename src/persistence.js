@@ -11,7 +11,7 @@ import * as object from 'lib0/object'
 import * as s from 'lib0/schema'
 // eslint-disable-next-line
 import * as t from './types.js'
-import { isSmallerRedisClock } from './stream.js'
+import { isSmallerRedisClock, redisClockToMs } from './stream.js'
 import { logger, describeUrl } from './logger.js'
 
 const log = logger.child({ module: 'persistence' })
@@ -48,6 +48,45 @@ const decodeTombstone = row => ({
   purgedAt: row.purged_at == null ? null : number.parseInt(row.purged_at),
   by: row.by
 })
+
+/**
+ * INT8 columns are read back as strings, `custom` is lib0-any encoded.
+ *
+ * @param {{ t: string, name: string, custom: Uint8Array, published: boolean, published_at: string|null, published_by: string|null, created_at: string, updated_at: string, created_by: string|null, updated_by: string|null }} row
+ * @return {t.Version}
+ */
+const decodeVersion = row => ({
+  type: 'version:v1',
+  t: number.parseInt(row.t),
+  name: row.name,
+  createdAt: number.parseInt(row.created_at),
+  updatedAt: number.parseInt(row.updated_at),
+  createdBy: row.created_by,
+  updatedBy: row.updated_by,
+  custom: buffer.decodeAny(row.custom),
+  published: row.published,
+  publishedAt: row.published_at == null ? null : number.parseInt(row.published_at),
+  publishedBy: row.published_by
+})
+
+/**
+ * The publication columns a named-version write sets on a stored row: an omitted `published` keeps
+ * them, publishing stamps the time and the writer - unless the version is published already, then
+ * it keeps its stamp - and unpublishing clears the stamp. The expressions read the stored row,
+ * which `UPDATE` and `ON CONFLICT DO UPDATE` both refer to by the table name.
+ *
+ * @param {import('postgres').Sql} sql
+ * @param {boolean|undefined} published
+ * @param {number} at
+ * @param {string|null} by
+ */
+const publicationSet = (sql, published, at, by) => published === undefined
+  ? sql``
+  : published
+    ? sql`, published = true,
+      published_at = CASE WHEN yhub_ydoc_versions_v1.published THEN yhub_ydoc_versions_v1.published_at ELSE ${at} END,
+      published_by = CASE WHEN yhub_ydoc_versions_v1.published THEN yhub_ydoc_versions_v1.published_by ELSE ${by} END`
+    : sql`, published = false, published_at = NULL, published_by = NULL`
 
 /**
  * The four assets a version row holds: the column that stores each one, the `includeContent` flag
@@ -174,7 +213,7 @@ export class Persistence {
     const encodedNongcDocAsset = buffer.encodeAny(nongcDocAsset)
     const encodedContentmapAsset = buffer.encodeAny(contentmapAsset)
     const encodedContentidsAsset = buffer.encodeAny(contentidsAsset)
-    const created = number.parseInt(lastClock.split('-')[0])
+    const created = redisClockToMs(lastClock)
     // The `WHERE NOT EXISTS` is the hard-deletion barrier, and it has to be part of this
     // statement rather than a check in front of it: a compact task spends seconds to minutes
     // merging between reading the document's state and arriving here, and `ON CONFLICT` cannot
@@ -418,10 +457,135 @@ export class Persistence {
   }
 
   /**
+   * The named versions of `docRef` with `from <= t <= to`, oldest first - at most `limit` of them:
+   * the oldest ones, or with `order: 'desc'` the newest ones.
+   *
+   * @param {t.DocRef} docRef
+   * @param {object} range
+   * @param {number} range.from
+   * @param {number} range.to
+   * @param {number} [range.limit]
+   * @param {'asc'|'desc'} [range.order]
+   * @return {Promise<Array<t.Version>>}
+   */
+  async retrieveVersions (docRef, { from, to, limit, order = 'asc' }) {
+    const rows = await this.sql`
+      SELECT t, name, custom, published, published_at, published_by, created_at, updated_at, created_by, updated_by FROM yhub_ydoc_versions_v1
+      WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch} AND t BETWEEN ${from} AND ${to}
+      ORDER BY t ${order === 'desc' ? this.sql`DESC` : this.sql`ASC`}
+      ${limit == null ? this.sql`` : this.sql`LIMIT ${limit}`}
+    `
+    const versions = rows.map(row => decodeVersion(/** @type {any} */ (row)))
+    return order === 'desc' ? versions.reverse() : versions
+  }
+
+  /**
+   * Create the named version of `docRef` at `t`, or with `replace` create or replace it - a
+   * replacement keeps the creation fields, and moves `updated_at` past the replaced one even
+   * within its millisecond (see `updateVersion`). Refused (`null`) on a hard-deleted document: the
+   * `WHERE NOT EXISTS` is the deletion barrier of `store`, so a write racing a purge can't leave a
+   * row behind. Without `replace` also refused when a version exists at `t`, and without
+   * `mayWritePublished` when the version to replace is published - part of the statement, so a
+   * version published after the caller checked can't be overwritten.
+   *
+   * @param {t.DocRef} docRef
+   * @param {object} version
+   * @param {number} version.t
+   * @param {string} version.name
+   * @param {Uint8Array<ArrayBuffer>} version.custom lib0-any encoded
+   * @param {boolean} [version.published] omitted, the stored flag is kept (`false` for a new version)
+   * @param {number} version.at unix ms of the write
+   * @param {string|null} version.by userid of the writer
+   * @param {object} [opts]
+   * @param {boolean} [opts.replace]
+   * @param {boolean} [opts.mayWritePublished] whether a published version may be replaced
+   * @return {Promise<t.Version|null>} the stored version
+   */
+  async storeVersion (docRef, { t, name, custom, published, at, by }, { replace = false, mayWritePublished = false } = {}) {
+    const [row] = await this.sql`
+      INSERT INTO yhub_ydoc_versions_v1 (org,docid,branch,t,name,custom,published,published_at,published_by,created_at,updated_at,created_by,updated_by)
+      SELECT ${docRef.org},${docRef.docid},${docRef.branch},${t},${name},${custom},${published ?? false},${published ? at : null},${published ? by : null},${at},${at},${by},${by}
+      WHERE NOT EXISTS (
+        SELECT 1 FROM yhub_ydoc_tombstones_v1 d
+        WHERE d.org = ${docRef.org} AND d.docid = ${docRef.docid} AND d.branch = ${docRef.branch} AND d.hard
+      )
+      ON CONFLICT (org,docid,branch,t) ${replace
+        ? this.sql`
+          DO UPDATE SET name = EXCLUDED.name, custom = EXCLUDED.custom,
+            updated_at = GREATEST(EXCLUDED.updated_at, yhub_ydoc_versions_v1.updated_at + 1), updated_by = EXCLUDED.updated_by
+            ${publicationSet(this.sql, published, at, by)}
+          ${mayWritePublished ? this.sql`` : this.sql`WHERE NOT yhub_ydoc_versions_v1.published`}`
+        : this.sql`DO NOTHING`}
+      RETURNING t, name, custom, published, published_at, published_by, created_at, updated_at, created_by, updated_by
+    `
+    return row == null ? null : decodeVersion(/** @type {any} */ (row))
+  }
+
+  /**
+   * Replace the named version of `docRef` at `t` - only while its `updated_at` is still
+   * `updatedAt`, the state the caller read. `updated_at` strictly increases with every write (a
+   * write in the millisecond of the previous one lands a millisecond later), so a match means
+   * nothing was written in between. Without `mayWritePublished` also only while it isn't published.
+   *
+   * @param {t.DocRef} docRef
+   * @param {object} version
+   * @param {number} version.t
+   * @param {string} version.name
+   * @param {Uint8Array<ArrayBuffer>} version.custom lib0-any encoded
+   * @param {boolean} [version.published] omitted, the stored flag is kept
+   * @param {number} version.at unix ms of the write
+   * @param {string|null} version.by userid of the writer
+   * @param {number} version.updatedAt the `updatedAt` the caller read
+   * @param {object} [opts]
+   * @param {boolean} [opts.mayWritePublished] whether a published version may be written
+   * @return {Promise<{ updated: boolean, version: t.Version|null }>} the written version - or, not
+   * updated, the current one (`null` when there is none)
+   */
+  async updateVersion (docRef, { t, name, custom, published, at, by, updatedAt }, { mayWritePublished = false } = {}) {
+    const [row] = await this.sql`
+      UPDATE yhub_ydoc_versions_v1
+      SET name = ${name}, custom = ${custom}, updated_at = GREATEST(${at}, updated_at + 1), updated_by = ${by}
+        ${publicationSet(this.sql, published, at, by)}
+      WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch} AND t = ${t} AND updated_at = ${updatedAt}
+      ${mayWritePublished ? this.sql`` : this.sql`AND NOT published`}
+      RETURNING t, name, custom, published, published_at, published_by, created_at, updated_at, created_by, updated_by
+    `
+    if (row != null) return { updated: true, version: decodeVersion(/** @type {any} */ (row)) }
+    const [current] = await this.retrieveVersions(docRef, { from: t, to: t })
+    return { updated: false, version: current ?? null }
+  }
+
+  /**
+   * Delete the named version of `docRef` at `t` - only while its `updated_at` is still
+   * `updatedAt`, the state the caller read (see `updateVersion`), and without `mayWritePublished`
+   * only while it isn't published.
+   *
+   * @param {t.DocRef} docRef
+   * @param {object} version
+   * @param {number} version.t
+   * @param {number} version.updatedAt the `updatedAt` the caller read
+   * @param {object} [opts]
+   * @param {boolean} [opts.mayWritePublished] whether a published version may be deleted
+   * @return {Promise<{ deleted: boolean, version: t.Version|null }>} not deleted, the current
+   * version (`null` when there is none)
+   */
+  async deleteVersion (docRef, { t, updatedAt }, { mayWritePublished = false } = {}) {
+    const { count } = await this.sql`
+      DELETE FROM yhub_ydoc_versions_v1
+      WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch} AND t = ${t} AND updated_at = ${updatedAt}
+      ${mayWritePublished ? this.sql`` : this.sql`AND NOT published`}
+    `
+    if (count > 0) return { deleted: true, version: null }
+    const [current] = await this.retrieveVersions(docRef, { from: t, to: t })
+    return { deleted: false, version: current ?? null }
+  }
+
+  /**
    * Erase every stored version of `docRef`, through the same `deleteReferences` path compaction
    * uses to drop superseded versions - so there is one way to delete stored content, and it
    * always removes the row before the asset it points at. The reverse order would leave rows
-   * referencing objects that no longer exist, which read back as silently missing content.
+   * referencing objects that no longer exist, which read back as silently missing content. The
+   * named versions of `docRef` go with it.
    *
    * Idempotent: the reference listing covers rows whose objects are already gone, so re-running
    * this is how a compaction that was still in flight when the document was deleted gets
@@ -432,7 +596,13 @@ export class Persistence {
    */
   async purgeDoc (docRef) {
     const { assets } = await this.retrieveAssets(docRef, { gc: true, nongc: true, contentmap: true, contentids: true }, { onlyReferences: true })
-    await this.deleteReferences(assets)
+    await promise.all([
+      this.deleteReferences(assets),
+      this.sql`
+        DELETE FROM yhub_ydoc_versions_v1
+        WHERE org = ${docRef.org} AND docid = ${docRef.docid} AND branch = ${docRef.branch}
+      `
+    ])
     log.info({ docRef, assetCount: assets.length }, 'purged doc')
     return assets.length
   }

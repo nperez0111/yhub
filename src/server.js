@@ -253,7 +253,7 @@ class WSUser {
    * (the nongc doc *is* the full history). Any difference disconnects, downgrades and upgrades
    * alike - the client reconnects, re-authenticates, and resyncs at its new access level
    * (updating the gates in place would silently drop a downgraded client's updates and diverge
-   * it from the server). REST-only facets (`delete`, `history.rollback`/`prune`, the other
+   * it from the server). REST-only facets (`delete`, `history.rollback`/`prune`/`version`/`publish`, the other
    * `endpoint` entries) never bounce a live connection. Fails closed: an auth plugin error also
    * disconnects, but with the transient code 1013 instead of 4401 - the client keeps
    * reconnecting and is re-checked at upgrade, so it recovers once the auth backend does.

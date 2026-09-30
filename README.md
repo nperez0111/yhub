@@ -139,6 +139,24 @@ CREATE TABLE yhub_ydoc_tombstones_v1 (
     by          text,
     PRIMARY KEY (org, docid, branch)
 );
+
+-- Named versions: annotated points in the history of a document. See API.md#versions.
+CREATE TABLE yhub_ydoc_versions_v1 (
+    org         text,
+    docid       text,
+    branch      text,
+    t           INT8,             -- Unix ms, the point in the history (an activity `to`)
+    name        text    NOT NULL,
+    custom      bytea   NOT NULL, -- the client's data, lib0-any encoded
+    published   boolean NOT NULL DEFAULT false, -- reserved for future use
+    published_at INT8,            -- Unix ms (redis TIME) of the publication, NULL while unpublished
+    published_by text,
+    created_at  INT8    NOT NULL, -- Unix ms (redis TIME)
+    updated_at  INT8    NOT NULL, -- Unix ms (redis TIME)
+    created_by  text,
+    updated_by  text,
+    PRIMARY KEY (org, docid, branch, t)
+);
 ```
 
 ### Update Encoding
@@ -251,14 +269,14 @@ const docPermissions = {
     type: 'permissions:document:v1',
     ydoc: 'cru-',         // positional crud mask, '-' denies: r = read/sync, u = write (c/d reserved, do nothing yet)
     awareness: '-ru-',    // r = receive presence, u = broadcast own (c/d reserved)
-    history: { from: 0 }, // from-ray, unix ms; 0 grants the full history
+    history: { from: 0, version: 'crud' }, // from-ray, unix ms (0 grants the full history), named versions within it
     endpoint: { '*': 'crud' } // rest endpoints + the websocket route ('ws'), '*' = fallback
   },
   r: {
     type: 'permissions:document:v1',
     ydoc: '-r--',
     awareness: '-ru-',
-    history: { from: 0 },
+    history: { from: 0, version: '-r--' },
     endpoint: { '*': '-r--' }
   }
 }

@@ -71,7 +71,7 @@ export const testCrudOps = _tc => {
 export const testNormalize = _tc => {
   const n = p.normalizeDocumentPermissions({ type: doc, ydoc: 'cru-', history: { from: 7, rollback: true }, delete: ['soft'], endpoint: { '*': 'cr--', muted: false } })
   t.assert(n.ydoc === 'cru-' && n.awareness === '----')
-  t.compare(n.history, { from: 7, rollback: true, prune: false })
+  t.compare(n.history, { from: 7, rollback: true, prune: false, version: '----', publish: false })
   t.compare(n.delete, ['soft'])
   t.assert(n.endpoint['*'] === 'cr--')
   // false normalizes to the one denial spelling '----'
@@ -81,6 +81,7 @@ export const testNormalize = _tc => {
   t.assert(p.normalizeDocumentPermissions({ type: doc, delete: [] }).delete === false)
   t.assert(p.normalizeDocumentPermissions({ type: doc, delete: false }).delete === false)
   t.assert(p.normalizeDocumentPermissions({ type: doc, history: false }).history === false)
+  t.compare(p.normalizeDocumentPermissions({ type: doc, history: { from: 0, version: false } }).history, { from: 0, rollback: false, prune: false, version: '----', publish: false })
   t.assert(p.normalizeDocumentPermissions({ type: doc, endpoint: false }).endpoint.anything === undefined)
   // the normalized view is a prototype-less plain object with eager plain values
   t.assert(Object.getPrototypeOf(n) === null && Object.getPrototypeOf(n.endpoint) === null)
@@ -90,6 +91,7 @@ export const testNormalize = _tc => {
   t.fails(() => p.normalizeDocumentPermissions(/** @type {any} */ ({ type: doc, ydoc: 'rw' })))
   t.fails(() => p.normalizeDocumentPermissions(/** @type {any} */ ({ type: doc, ydoc: null })))
   t.fails(() => p.normalizeDocumentPermissions(/** @type {any} */ ({ type: doc, history: { from: -1 } })))
+  t.fails(() => p.normalizeDocumentPermissions(/** @type {any} */ ({ type: doc, history: { from: 0, version: 'rw' } })))
   t.fails(() => p.normalizeDocumentPermissions(/** @type {any} */ ({ type: 'permissions:org:v1' })))
 }
 
@@ -99,9 +101,13 @@ export const testNormalize = _tc => {
 export const testImplicationNormalization = _tc => {
   // rollback/prune are dead grants without update access on the doc
   const readOnly = p.normalizeDocumentPermissions({ type: doc, ydoc: '-r--', history: { from: 0, rollback: true, prune: true } })
-  t.compare(readOnly.history, { from: 0, rollback: false, prune: false })
+  t.compare(readOnly.history, { from: 0, rollback: false, prune: false, version: '----', publish: false })
   const writer = p.normalizeDocumentPermissions({ type: doc, ydoc: '-ru-', history: { from: 0, rollback: true } })
-  t.compare(writer.history, { from: 0, rollback: true, prune: false })
+  t.compare(writer.history, { from: 0, rollback: true, prune: false, version: '----', publish: false })
+  // named versions don't write the document - no implication
+  t.compare(p.normalizeDocumentPermissions({ type: doc, history: { from: 0, version: 'crud' } }).history, { from: 0, rollback: false, prune: false, version: 'crud', publish: false })
+  // publish is independent of the version bits - it only acts together with a version write
+  t.compare(p.normalizeDocumentPermissions({ type: doc, history: { from: 0, publish: true } }).history, { from: 0, rollback: false, prune: false, version: '----', publish: true })
 }
 
 /**
@@ -196,12 +202,12 @@ export const testMergeRefusesMixedTypes = _tc => {
  */
 export const testUnion = _tc => {
   const u = p.documentPermissionsUnion(
-    { type: doc, ydoc: '-r--', history: { from: 10 }, delete: ['soft'], endpoint: { comments: '-r--' } },
-    { type: doc, ydoc: '-ru-', awareness: '-ru-', history: { from: 20, rollback: true }, delete: ['hard'], endpoint: { comments: 'c-u-', votes: 'crud' } }
+    { type: doc, ydoc: '-r--', history: { from: 10, version: '-r--', publish: true }, delete: ['soft'], endpoint: { comments: '-r--' } },
+    { type: doc, ydoc: '-ru-', awareness: '-ru-', history: { from: 20, rollback: true, version: 'c---' }, delete: ['hard'], endpoint: { comments: 'c-u-', votes: 'crud' } }
   )
   const n = p.normalizeDocumentPermissions(u)
   t.assert(n.ydoc === '-ru-' && n.awareness === '-ru-')
-  t.compare(n.history, { from: 10, rollback: true, prune: false }) // rays join by min
+  t.compare(n.history, { from: 10, rollback: true, prune: false, version: 'cr--', publish: true }) // rays join by min
   t.compare(/** @type {any} */ (n.delete).slice().sort(), ['hard', 'soft'])
   t.assert(n.endpoint.comments === 'cru-' && n.endpoint.votes === 'crud')
   // false is bottom for the union - a grant survives it
@@ -222,13 +228,13 @@ export const testUnion = _tc => {
  */
 export const testIntersect = _tc => {
   const i = p.documentPermissionsIntersect(
-    { type: doc, ydoc: 'cru-', history: { from: 10, rollback: true }, delete: ['soft', 'hard'], endpoint: { comments: 'cru-' } },
-    { type: doc, ydoc: '-rud', history: { from: 20, rollback: true }, delete: ['hard'], endpoint: { '*': '-ru-' } }
+    { type: doc, ydoc: 'cru-', history: { from: 10, rollback: true, version: 'cru-', publish: true }, delete: ['soft', 'hard'], endpoint: { comments: 'cru-' } },
+    { type: doc, ydoc: '-rud', history: { from: 20, rollback: true, version: '-rud' }, delete: ['hard'], endpoint: { '*': '-ru-' } }
   )
   const n = p.normalizeDocumentPermissions(/** @type {any} */ (i))
   t.assert(n.ydoc === '-ru-')
   t.assert(n.awareness === '----') // unspecified ∩ unspecified
-  t.compare(n.history, { from: 20, rollback: true, prune: false }) // the more restrictive ray survives
+  t.compare(n.history, { from: 20, rollback: true, prune: false, version: '-ru-', publish: false }) // the more restrictive ray survives
   t.compare(n.delete, ['hard'])
   t.assert(n.endpoint.comments === '-ru-') // resolved through the other side's '*'
   // false absorbs in an intersection
@@ -257,7 +263,9 @@ const randomDocPermissions = gen => {
   const history = maybe(() => ({
     from: prng.int32(gen, 0, 100),
     ...(prng.bool(gen) ? { rollback: prng.bool(gen) } : {}),
-    ...(prng.bool(gen) ? { prune: prng.bool(gen) } : {})
+    ...(prng.bool(gen) ? { prune: prng.bool(gen) } : {}),
+    ...(prng.bool(gen) ? { version: prng.oneOf(gen, [false, crud()]) } : {}),
+    ...(prng.bool(gen) ? { publish: prng.bool(gen) } : {})
   }))
   if (history !== undefined) result.history = history
   const del = maybe(() => prng.oneOf(gen, [[], ['soft'], ['hard'], ['soft', 'hard']]))
@@ -325,10 +333,10 @@ export const testMergeMonotonicity = tc => {
       t.assert(p.crudIntersect(side.ydoc, x.ydoc) === x.ydoc)
       t.assert(p.crudUnion(side.awareness, u.awareness) === u.awareness)
       if (side.history !== false) {
-        t.assert(u.history !== false && u.history.from <= side.history.from)
+        t.assert(u.history !== false && u.history.from <= side.history.from && p.crudUnion(side.history.version, u.history.version) === u.history.version && (!side.history.publish || u.history.publish))
       }
       if (x.history !== false) {
-        t.assert(side.history !== false && x.history.from >= side.history.from)
+        t.assert(side.history !== false && x.history.from >= side.history.from && p.crudIntersect(side.history.version, x.history.version) === x.history.version && (!x.history.publish || side.history.publish))
       }
       if (side.delete !== false) {
         side.delete.forEach(kind => t.assert(/** @type {any} */ (u.delete).includes(kind)))
@@ -398,6 +406,18 @@ export const testHasPermissions = _tc => {
   t.assert(!has({ type: doc, ydoc: 'cru-', history: { from: 0 } }, { history: { from: 0, rollback: true } }))
   t.assert(!has({ type: doc, ydoc: '-r--', history: { from: 0, rollback: true } }, { history: { from: 0, rollback: true } }))
   t.assert(!has({ type: doc, ydoc: '--u-', history: { from: 0, rollback: true } }, { history: { from: 0, prune: true } }))
+  // named versions: a crud mask within the ray, with no implication
+  const versionReader = { type: doc, history: { from: 500, version: '-r--' } }
+  t.assert(has(/** @type {any} */ (versionReader), { history: { from: 700, version: '-r--' } }))
+  t.assert(!has(/** @type {any} */ (versionReader), { history: { from: 700, version: 'c---' } }))
+  t.assert(!has(/** @type {any} */ (versionReader), { history: { from: 300, version: '-r--' } }), 'the ray bounds the named versions too')
+  t.assert(!has(grant, { history: { from: 700, version: '-r--' } }), 'history access alone grants no named versions')
+  t.assert(has(/** @type {any} */ (versionReader), { history: { from: 700 } }))
+  // publish: a named boolean within the ray
+  const publisher = { type: doc, history: { from: 500, version: 'crud', publish: true } }
+  t.assert(has(/** @type {any} */ (publisher), { history: { from: 700, publish: true } }))
+  t.assert(!has(/** @type {any} */ (publisher), { history: { from: 300, publish: true } }), 'the ray bounds publishing too')
+  t.assert(!has(/** @type {any} */ ({ type: doc, history: { from: 0, version: 'crud' } }), { history: { from: 0, publish: true } }), 'version write access alone may not publish')
   // delete kinds are a subset check, order-insensitive
   t.assert(has(grant, { delete: ['soft'] }))
   t.assert(!has(grant, { delete: ['hard'] }))
@@ -426,6 +446,9 @@ export const testHasPermissions = _tc => {
   t.fails(() => has(grant, { ydoc: 'rw' })) // invalid mask, no history
   t.fails(() => has(grant, { ydoc: 'rw', history: { from: 0, rollback: true } })) // invalid mask not laundered by the rollback closure
   t.fails(() => has(grant, { history: { from: 0, rollbck: true } })) // a typo in a nested history key
+  t.fails(() => has(grant, { history: { from: 0, verison: '-r--' } }))
+  t.fails(() => has(grant, { history: { from: 0, publsh: true } }))
+  t.fails(() => has(grant, { history: { from: 0, version: 'rw' } }))
   t.fails(() => p.hasPermissions(org, p.createOrgPermissions(/** @type {any} */ ({ ydoc: '-r--' })))) // a wrong-scope facet
   t.fails(() => has(grant, { recent: true })) // an unknown facet
   // a pure-denial requirement facet is a caller bug (it would be satisfied by everyone)

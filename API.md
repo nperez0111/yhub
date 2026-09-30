@@ -97,8 +97,8 @@ Error responses carry a lib0-any encoded `{ error: string, ...extra }` body (see
 
 | Status | Sent when | Retry? |
 |---|---|---|
-| `400` `404` `409` `422` | caller mistake — invalid body or query (`code: 'invalid-body'` / `'invalid-query'`), missing resource, conflict | no — fix the request |
-| `401` `403` | `401`: the auth plugin rejected a presented credential (a branded `apiError(401)`), or an anonymous caller tried to write the document (`code: 'unauthenticated'` — attributions carry the userid; see [Anonymous callers](#contracts)); `403`: no access | no — obtain fresh credentials, then send a new request |
+| `400` `404` `409` `413` `422` | caller mistake — invalid body or query (`code: 'invalid-body'` / `'invalid-query'`), missing resource, conflict, payload too large | no — fix the request |
+| `401` `403` | `401`: the auth plugin rejected a presented credential (a branded `apiError(401)`), or an anonymous caller tried to write the document or a named version (`code: 'unauthenticated'` — attributions carry the userid; see [Anonymous callers](#contracts)); `403`: no access | no — obtain fresh credentials, then send a new request |
 | `403` with `code: 'missing-permission'` | the caller is authenticated but its permissions don't contain what the request requires — the message reads `requires permission {...}` and the `required` field carries the request's whole requirement as a permission object of the route's scope, e.g. `{ type: 'permissions:document:v1', ydoc: '--u-' }` or `{ type: 'permissions:document:v1', delete: ['hard'] }`; changeset/activity name the clamped ray start, `history: { from }` — the query's `from` limited to the granted ray (see [Permissions](#permissions)) | no — the grant must change first |
 | `403` with `code: 'origin-not-allowed'` | the page's origin is not allowed by `server.cors` (see [CORS](#cors)) — always json | no — fix the server's cors config, not the credentials |
 | `429` | rate limited — yhub itself never sends this; reserved for proxies and custom endpoints | yes — back off first |
@@ -124,6 +124,7 @@ Values are mapped to json as follows:
 | Value | JSON |
 |---|---|
 | `Uint8Array` / `Buffer` (any nesting depth) | base64 string — decode with `buffer.fromBase64` (`lib0/buffer`) |
+| `bigint` | decimal string |
 | `undefined` | `null`, the key is preserved |
 | `Date` | epoch milliseconds number |
 
@@ -181,7 +182,7 @@ for `?hard=true`. Deletion is never implied by a write mask; it is granted by na
   * Returns `{ deletedAt: number, hard: boolean, by: string|null }`. `deletedAt` is the unix-ms timestamp of the deletion.
   * Idempotent: deleting an already-deleted document answers `200` with the record that is already there, and the original `deletedAt` is never moved by a retry.
 
-After a deletion every endpoint that reads the document answers `404` — `GET`/`PATCH /api/ydoc/v1`, `rollback`, `prune`, `changeset`, `activity`, and any custom endpoint that calls `yhub.getDoc`. Responses cached before the deletion are dropped as part of it, so the `404` is immediate rather than delayed by `cacheTtl`.
+After a deletion every endpoint that reads the document answers `404` — `GET`/`PATCH /api/ydoc/v1`, `rollback`, `prune`, `changeset`, `activity`, `version`, and any custom endpoint that calls `yhub.getDoc`. Responses cached before the deletion are dropped as part of it, so the `404` is immediate rather than delayed by `cacheTtl`.
 
 #### PATCH /api/ydoc/v1/{org}/{docid}
 
@@ -257,8 +258,8 @@ silently clamped.
 #### Example
 
 * Rollback all changes that happened after timestamp `X`: `POST /api/rollback/v1/{org}/{docid}?from=X`
-  * If your "versions" have timestamps, this call enables you to revert to a specific
-    version of the document.
+  * This reverts the document to a specific version: pass `from: t + 1` to restore the
+    [named version](#versions) at `t`.
 * Rollback all changes from user-id `U` that happened between timestamp `X` and `Y`: `POST /api/rollback/v1/{org}/{docid}?by=U&from=X&to=Y`
   * This call enables you to undo all changes within a certain editing-interval.
 * Rollback all changes of a certain user between two versions: `POST /api/rollback/v1/{org}/{docid}` body: `{ by: userid, contentIds: Y.createContentIdsFromDocDiff(prevYDoc, nextYDoc) }`
@@ -298,9 +299,10 @@ Retrieve all editing-timestamps for a certain document. Use
 the activity API and the changeset API to reconstruct an editing trail.
 
 Access: the `history` facet, with the same clamping and ydoc-read rule as
-[changeset](#changeset).
+[changeset](#changeset). [Named versions](#versions) are included when the caller also holds
+`history.version` `r`.
 
-* `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupByUser?: boolean, groupMaxGap?: number, groupMaxDuration?: number, groupExclude?: string, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string }`
+* `GET /api/activity/v1/{org}/{docid}` parameters: `{ from?: number, to?: number, by?: string, limit?: number, order?: string, group?: boolean, groupByUser?: boolean, groupMaxGap?: number, groupMaxDuration?: number, groupExclude?: string, delta?: boolean, withCustomAttributions?: string, customAttributions?: boolean, contentIds?: string, versions?: boolean }`
   * `from`/`to`: unix timestamp range filter — non-negative integers (`400` otherwise); `to` is lifted to the clamped `from`, so it never lies below the granted ray
   * `by=string`: comma-separated list of user-ids to filter by
   * `withCustomAttributions=string`: filter by custom attributions using `key:value` pairs, comma-separated (e.g. `source:import,tag:v2`). Only changes matching all specified attributions are included.
@@ -310,13 +312,14 @@ Access: the `history` facet, with the same clamping and ydoc-read rule as
   * `group=boolean`: bundle consecutive changes from the same user into a single entry (experimental)
   * `groupByUser=boolean`: whether an entry may only cover one author (default: `true`). With `false`, consecutive changes merge regardless of who made them — `groupMaxGap`/`groupMaxDuration` alone decide the grouping — and the entry's `by` becomes a deduplicated array of every contributing user-id, in the order they first appear. The array is returned whenever `groupByUser=false`, even for a single author (`['user1']`), and holds `null` for changes with no recorded author (`[null, 'user1']`). Each entry's `attributions`/`delta` then keep every change's own author and timestamp instead of the uniform stamp described below. Note that `group=false` still merges changes within the same millisecond, so with `groupByUser=false` two users editing in the same millisecond share an entry. Only applies when grouping is enabled.
   * `groupMaxGap=number`: maximum time gap (in milliseconds) between consecutive changes by the same user that still merges them into a single entry (default: `1000`). Only applies when grouping is enabled.
-  * `groupMaxDuration=number`: maximum total span (in milliseconds) of a grouped entry (`entry.to - entry.from`). A change is not merged into a group if the resulting span would exceed this value (default: unlimited). Only applies when grouping is enabled.
+  * `groupMaxDuration=number`: maximum total span (in milliseconds) of the changes of a grouped entry. A change is not merged into a group if the resulting span would exceed this value (default: unlimited). An entry closed by a named version reports the version's time as its `to`, so `entry.to - entry.from` may exceed it. Only applies when grouping is enabled.
   * `groupExclude=string`: comma-separated user-ids exempt from grouping — their consecutive changes stay individual entries while other users group normally. Only applies when grouping is enabled.
   * `delta=boolean`: include a delta representation for each activity entry — the document at that entry's `to`, with the entry's changes highlighted.
   * `ydoc=boolean`: return a single shared partially-gc'd document for the whole list, plus per entry a `renderedContent` IdSet (= content alive at the entry's `to`). The response shape becomes `{ ydoc, activity }`. Render any entry client-side by applying `ydoc` to a `gc: false` doc and overlaying an `AttributionsRenderer` with that entry's `renderedContent` (and `attributions`) — see [Rendering with AttributionsRenderer](#rendering-with-attributionsrenderer).
   * `attributions=boolean`: include each entry's attribution `ContentMap` (as `attributions: Uint8Array`).
   * `customAttributions=true`: include the list of custom attributions associated with each activity entry. When enabled, each entry includes a `customAttributions` field containing deduplicated `{ k, v }` pairs collected from the underlying attribution attributes (e.g. `insert:<key>`). When grouping is enabled, custom attributions from merged entries are combined and deduplicated.
-  * Returns `{ activity: Array<{ from: number, to: number, by: string|Array<string?>|null, delta?: Delta, renderedContent?: Uint8Array, attributions?: Uint8Array, customAttributions?: Array<{ k: string, v: string }> }>, ydoc?: Uint8Array }`. The top-level shape is stable regardless of `ydoc`. Served as `application/x-lib0any` (json on `Accept: application/json`, binary fields as base64 — see [JSON encoding](#json-encoding)).
+  * `versions=boolean`: cut the activity at the [named versions](#versions) in `[from, to]` (default: `true` when the caller holds `history.version` `r`, `false` otherwise — an explicit `versions=true` without that grant is refused with `403`). No entry spans a version: the entry holding the last change up to and including the version's time `t` ends at `to: t` and carries it as `version` — however far past `groupMaxGap` that change lies. A version without a change since the previous one (or since `from`, or without a change matching the filters) is an entry of its own, flagged `isEmpty`: `{ from: t, to: t, by: null, version, isEmpty: true }` (`by: []` with `groupByUser=false`, `customAttributions: []` when requested). `isEmpty` is absent on every other entry. Filters never hide a version. `limit`/`order` count these entries like any other.
+  * Returns `{ activity: Array<{ from: number, to: number, by: string|Array<string?>|null, delta?: Delta, renderedContent?: Uint8Array, attributions?: Uint8Array, customAttributions?: Array<{ k: string, v: string }>, version?: Version, isEmpty?: true }>, ydoc?: Uint8Array }`. The top-level shape is stable regardless of `ydoc`. Served as `application/x-lib0any` (json on `Accept: application/json`, binary fields as base64 — see [JSON encoding](#json-encoding)).
     * `ydoc` is present only when `ydoc=true`; `renderedContent` on each entry only when `ydoc=true`; `attributions` only when `attributions=true`; `customAttributions` only when `customAttributions=true`.
 
 ### Rendering with `AttributionsRenderer`
@@ -355,6 +358,93 @@ res.activity.forEach(entry => {
 
 When `delta=true`, the server performs exactly this rendering and returns the result as
 `changeset.delta` / `entry.delta`.
+
+### Versions
+
+A named version annotates a point `t` in the history of a document (unix ms, the same kind of
+value as an [activity](#activity) entry's `from`/`to`) with a name and custom data. Where an
+activity entry describes a range of changes, a version describes the document as it was at `t`:
+the typical workflow shows the activity list, and names an entry by creating a version at its
+`to`. Named versions are per branch, like everything else, and the [activity](#activity) cuts
+at them.
+
+```js
+// the version object
+{
+  type: 'version:v1',
+  t: number,              // the point in the history, unix ms
+  name: string,           // '' for an unnamed version
+  createdAt: number,      // unix ms (redis TIME) of the creation
+  updatedAt: number,      // unix ms (redis TIME) of the last write - strictly increasing, see PATCH
+  createdBy: string|null, // userid of the creator
+  updatedBy: string|null, // userid of the last writer
+  custom: any,            // the client's own data, any lib0-any value (null when omitted)
+  published: boolean,     // reserved for future use - no effect yet beyond freezing the version, see below
+  publishedAt: number|null, // unix ms (redis TIME) of the publication - null while unpublished
+  publishedBy: string|null  // userid of the publisher - null while unpublished
+}
+```
+
+A client writes `{ type: 'version:v1', t, name, custom?, published? }` — its part of the object. The other
+fields are the server's, and any other key is refused with `400`: client data belongs in
+`custom`. The client's part is limited to `server.maxVersionSize` — the characters of `name` plus
+the bytes of the lib0-any encoded `custom` (default 64K), `413 { code: 'version-too-large' }` beyond it;
+versions ride along in activity responses, so keep it small. Json clients get binary `custom` data as base64 and a `bigint` as its
+decimal string (see [JSON encoding](#json-encoding)).
+
+`published` is reserved for future use (readers seeing published versions). Only an explicit value
+changes it — a write that omits it keeps the stored flag, and a new version starts unpublished —
+and only for callers granted `history.publish`: without it an explicit `published` is ignored, the
+rest of the write goes through. Publishing stamps `publishedAt`/`publishedBy`; a write that keeps
+the version published (omitting `published`, or sending `true` again) keeps the stamp, and
+unpublishing clears it. A published version is frozen: `PUT`, `PATCH` and `DELETE` of it
+need `history.publish` too, and answer `403` (naming `{ history: { from: t, publish: true } }`)
+otherwise.
+
+Access: `history.version`, a crud mask within the history ray — `r` lists (clamped to the ray,
+never refused), `c`/`u`/`d` create/update/delete versions whose `t` lies within the ray (a `t`
+before it is refused with `403`, never clamped). Writing a version attributes it, so creating and
+updating one needs an identity (`401` for an anonymous caller, see
+[Anonymous callers](#contracts)). `r` covers the versions' metadata only — never their content.
+Reading the document as it stood at a version is the [changeset](#changeset) `to=t&ydoc=true`,
+which needs ydoc `r` and a ray reaching `t`. A read limited to named versions would be a separate
+grant, so `version` `r` grants keep their meaning.
+
+* `GET /api/version/v1/{org}/{docid}` parameters: `{ from?: number, to?: number }`
+  * Returns `{ versions: Array<Version> }`, oldest first, with `from <= t <= to`.
+* `POST /api/version/v1/{org}/{docid}` body: `{ type: 'version:v1', t?: number, name: string, custom?: any, published?: boolean }` — create a version. Requires `history.version` `c`.
+  * `t`: the point to name — pass an activity entry's `to`. It is taken as is; nothing checks that
+    it matches a change. Omitted, it is the last update of the document: the time of the last
+    update on the redis stream, else the time the document was last persisted (both are redis
+    stream ids, so this may lie a few milliseconds after the last change's attribution time —
+    the version still captures the same state). A document without any history answers
+    `400 { code: 'no-history' }`, as does `t: 0`.
+  * Returns the `Version`; `409 { code: 'version-exists' }` when `t` is already named.
+* `PATCH /api/version/v1/{org}/{docid}` body: `{ type: 'version:v1', t: number, updatedAt: number, name: string, custom?: any, published?: boolean }` — replace the `name`, `custom` and `published` of the version at `t`, **only if it is still the state the client read**: `updatedAt` must be the version's current `updatedAt`. Requires `history.version` `u`. **This is the recommended way to change a version** — two clients editing the same version can't silently overwrite each other.
+  * Returns the `Version`. `404 { code: 'version-not-found' }` when `t` is not named;
+    `409 { code: 'version-conflict', version }` when the version was written since the client
+    read it — `version` is the current one: merge the change onto it and retry with its
+    `updatedAt`.
+  * `updatedAt` strictly increases with every write, `PUT` included — a write within the
+    millisecond of the previous one lands a millisecond later — so a matching `updatedAt` means
+    nothing was written in between.
+* `PUT /api/version/v1/{org}/{docid}` body: `{ type: 'version:v1', t: number, name: string, custom?: any, published?: boolean }` — create the version at `t`, or replace its `name`, `custom` and `published` unconditionally (the last write wins; `createdAt`/`createdBy` are kept). Requires `history.version` `c` **and** `u` (`'c-u-'`), whichever of the two happens. Use `PATCH` to change a version someone else may be editing.
+  * Returns the `Version`.
+* `DELETE /api/version/v1/{org}/{docid}?t=number&updatedAt=number` — delete the version at `t`,
+  **only if it is still the state the client read**, like `PATCH`. Requires `history.version` `d`.
+  * Answers `204`. `409 { code: 'version-conflict', version }` when the version was written since
+    the client read it, so a newer version is never deleted by accident. Idempotent: a version
+    that is gone already answers `204` as well.
+
+A soft deletion of the document keeps its named versions (they come back with
+[`yhub.restoreDoc`](#yhubrestoredocdocref)), a hard deletion erases them. In both cases every
+method answers `404` while the document is deleted.
+
+A version is a point in time, not a frozen snapshot: the document at `t` is rendered from the
+attributed history (see the activity's `delta`/`ydoc` and [changeset](#changeset) `to=t`), so
+[pruning](#prune) a range around `t` changes what the version renders, and an update attributed
+with a time up to `t` that arrives later becomes part of it. Restore a version with a
+[rollback](#rollback) `from: t + 1`.
 
 ### Prune
 
@@ -426,7 +516,7 @@ await prune({ from: activity[i].from, to: activity[j].to })
 Define your own rest endpoints — served from the same process and guarded by the same auth plugin
 as the built-in endpoints — via the `server.api` config section. Every endpoint — built-in and
 custom — lives under `/{apiPrefix}/{name}/{version}/...`. The built-in endpoint names (`ydoc`,
-`rollback`, `prune`, `changeset`, `activity`, plus `ws` — the websocket route's own entry in the
+`rollback`, `prune`, `changeset`, `activity`, `version`, plus `ws` — the websocket route's own entry in the
 facet) are **refused for custom endpoints in any version**: one name in the `endpoint` permission
 facet must mean one route family (see [Permissions](#permissions)), and a custom route squatting a builtin name
 would blur what an `endpoint: { ydoc: ... }` grant covers — registration throws at startup. The prefix defaults
@@ -623,7 +713,7 @@ A **document** permission object carries the full facet vocabulary; the coarser 
   type: 'permissions:document:v1',
   ydoc: 'cru-',                    // positional crud mask: r = read/sync, u = write (c/d reserved, inert)
   awareness: '-ru-',               // presence: r = receive, u = broadcast own (c/d reserved, inert)
-  history: { from: 0, rollback: true, prune: false }, // attributed history from `from` (unix ms, 0 = full)
+  history: { from: 0, rollback: true, prune: false, version: '-r--', publish: false }, // attributed history from `from` (unix ms, 0 = full), named versions within it
   delete: ['soft'],                // deletion kinds - never implied by a write mask
   endpoint: { '*': '-r--', comments: 'crud' } // rest endpoints + the websocket route ('ws'); '*' is the fallback entry
 }
@@ -646,6 +736,8 @@ reserved for future use and currently grant nothing (deletion is granted solely 
 | `ydoc` / `awareness` `c`, `d` | nothing yet — reserved |
 | `history.from` | changeset/activity, clamped to the ray; `gc=false` needs `from: 0` |
 | `history.rollback` / `.prune` | `POST /rollback` / `POST /prune`, with range containment — rollback needs an identity |
+| `history.publish` | setting a [named version](#versions)'s `published` flag (ignored without it), and writing published versions (`403` without it) — within the ray |
+| `history.version` `c` / `r` / `u` / `d` | [named versions](#versions) within the ray: `POST` (`c`) / `GET` and activity `?versions=` (`r`) / `PATCH` (`u`) / `PUT` (`c` and `u`) / `DELETE` (`d`) — `r` clamps to the ray, the others refuse points before it; writes need an identity. Metadata only, never content |
 | `delete` `['soft'\|'hard']` | `DELETE /ydoc` by kind |
 | `endpoint` | rest endpoints — builtin and custom — and the websocket route (`ws`) by name, `'*'` as fallback (an explicit `'----'` blocks it) |
 | `endpoint.ws` `r` / `u` | the websocket route: `r` may connect, `u` may submit doc updates over it |
@@ -717,8 +809,10 @@ one lookup that isn't a single char compare.
   because attributions carry the userid — an anonymous caller *holding* ydoc `u` gets
   `401 { code: 'unauthenticated' }` from `PATCH /ydoc` (with an `update`), `POST /rollback`, and
   at the websocket upgrade, always *after* the permission check (without `u` it is the ordinary
-  `403`). Reads, presence (including an awareness-only `PATCH`), changeset/activity, prune, and
-  delete (recorded with `by: null`) work anonymously when granted.
+  `403`). Named versions are attributed the same way: `POST`/`PUT`/`PATCH /version` answer `401`
+  to an anonymous caller holding the `history.version` bits they need. Reads, presence (including an
+  awareness-only `PATCH`), changeset/activity, prune, delete (recorded with `by: null`), and
+  deleting a named version work anonymously when granted.
 
 #### Migrating from `AccessType`
 
@@ -986,6 +1080,7 @@ const yhub = await createYHub(config)
 | `server.api` | `ApiSpec[]` | no | Custom rest endpoints served under `/{apiPrefix}/{name}/{version}/...`, next to the built-in ones. See [Custom API endpoints](#custom-api-endpoints). |
 | `server.apiPrefix` | `string` | no | First path segment under which all endpoints are served — built-in and custom rest endpoints plus the websocket route `/{apiPrefix}/ws/v1/...` — e.g. `'collaboration'` → `/collaboration/{name}/{version}/...`. A single path segment. Default: `'api'` |
 | `server.maxDocSize` | `number` | no | Maximum Ydoc size in bytes, used for WebSocket payload limits (`maxPayloadLength`, and `maxBackpressure` at 1.2x). Updates are never split across frames, so this must exceed the largest document — a client that sends a bigger frame is closed with 1009. Default: 500 MB |
+| `server.maxVersionSize` | `number` | no | Maximum size of the client's part of a [named version](#versions) — the characters of its `name` plus the bytes of its lib0-any encoded `custom` data; larger writes answer `413`. Versions ride along in activity responses. Default: 64 KB |
 | `server.cors` | `object \| null` | no | Cross-origin resource sharing — see [CORS](#cors). **While this is unset, cross-origin browser access is closed**: no `Access-Control-*` header is sent, and cross-origin WebSocket upgrades and api requests are denied. Same-origin pages and non-browser clients are unaffected. |
 | `server.cors.origin` | `string \| string[]` | yes* | `'*'` for every origin, one origin, or an allowlist. An allowlist echoes back the request's `Origin` when it matches and sends `Vary: Origin`; a request from a non-matching origin is denied. An entry may start its host with `*.` — `https://*.example.com` matches every host under `example.com` but never the apex, and ports must be spelled out. Only wildcard a domain you own outright: `https://*.co.uk`-style public-suffix wildcards are accepted but allowlist every site under the suffix. |
 | `server.cors.credentials` | `boolean` | no | Send `Access-Control-Allow-Credentials: true`, letting browsers send cookies and http auth. Requires a concrete `origin` — `'*'` together with `credentials` throws at startup, because browsers reject the pair. Default: `false` |
@@ -1212,7 +1307,7 @@ the `ydoc` mask, the `awareness` mask, the effective `ws` endpoint mask, or — 
 connections — whether full history is still granted. Downgrades and upgrades alike bounce (the
 client reconnects, re-authenticates, and resyncs at its new access level; a still-revoked client
 is rejected with `403 Forbidden` at upgrade), while REST-only facets (`delete`,
-`history.rollback`/`prune`, the other `endpoint` entries) never bounce a live connection. A failing auth plugin fails closed: the connection is disconnected, but with the
+`history.rollback`/`prune`/`version`/`publish`, the other `endpoint` entries) never bounce a live connection. A failing auth plugin fails closed: the connection is disconnected, but with the
 transient close code `1013` (`'auth recheck failed'`) — clients keep reconnecting and recover once
 the auth backend does.
 

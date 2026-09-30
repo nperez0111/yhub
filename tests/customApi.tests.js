@@ -326,12 +326,13 @@ export const testJsonResponses = async tc => {
     const res = await fetch(`${base}/echo/v1/${doc}`, { headers: { Accept: '*/*' } })
     t.assert(res.headers.get('content-type') === 'application/x-lib0any')
   })
-  await t.groupAsync('binary → base64, Date → epoch millis, undefined → null with the key preserved', async () => {
+  await t.groupAsync('binary → base64, Date → epoch millis, bigint → decimal string, undefined → null with the key preserved', async () => {
     const res = await fetch(`${base}/jsonshape/v1/${doc}`, acceptJson)
     const body = await res.json()
     t.compare(Array.from(buffer.fromBase64(body.bin)), [1, 2, 254])
     t.compare(Array.from(buffer.fromBase64(body.buf)), [4, 5])
     t.assert(body.when === 1700000000000)
+    t.assert(body.big === '12345678901234567890')
     t.assert('missing' in body && body.missing === null)
     t.compare(Array.from(buffer.fromBase64(body.nested.deep)), [9])
     t.compare(Array.from(buffer.fromBase64(body.list[0])), [7])
@@ -626,11 +627,13 @@ export const testSpecValidation = _tc => {
   t.fails(() => registerApi(fakeYhub([{ name: 'ydoc', version: 'v2', get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'ws', version: 'v2', get: { handler } }]), stubApp))
   t.fails(() => registerApi(fakeYhub([{ name: 'changeset', path: '/:id', get: { handler } }]), stubApp))
+  t.fails(() => registerApi(fakeYhub([{ name: 'version', get: { handler } }]), stubApp))
   // configurable prefix: everything - built-ins included - is served under the renamed segment
   patterns.length = 0
   registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'collaboration'), stubApp)
   t.assert(patterns.includes('/collaboration/a/v1/:org/:docid'))
   t.assert(patterns.includes('/collaboration/activity/v1/:org/:docid'))
+  t.assert(patterns.includes('/collaboration/version/v1/:org/:docid'))
   // former reserved prefixes are now valid - there are no top-level routes left to collide with
   patterns.length = 0
   registerApi(fakeYhub([{ name: 'a', get: { handler } }], 'ydoc'), stubApp)

@@ -1,4 +1,5 @@
 import * as s from 'lib0/schema'
+import * as object from 'lib0/object'
 
 /**
  * # Asset
@@ -184,6 +185,64 @@ export const $docRef = s.$object({ org: s.$string, docid: s.$string, branch: s.$
  *
  * @typedef {{ org: string, docid: string, branch: string, deletedAt: number, hard: boolean, purgedAt: number|null, by: string|null }} Tombstone
  */
+
+/**
+ * `s.$object` accepts unknown keys - a strict object refuses them.
+ *
+ * @template {{ [key: string]: s.Schema<any> }} S
+ * @param {S} shape
+ */
+const $strictObject = shape => s.$intersect(
+  s.$object(shape),
+  /** @type {s.Schema<{}>} */ (s.$custom(o => object.keys(o).every(k => object.hasProperty(shape, k))))
+)
+
+/**
+ * A named version: the annotation of a point `t` in the history of a document (unix ms - an
+ * `activity.to`), stored in `yhub_ydoc_versions_v1`. The client supplies `name` (`''` = unnamed)
+ * and `custom`, any lib0-any value; the rest is the server's. Unknown keys are refused.
+ * `updatedAt` strictly increases with every write - a write in the millisecond of the previous one
+ * lands a millisecond later - so it identifies the state a client read (see `$versionPatch`).
+ */
+export const $version = $strictObject({
+  type: s.$literal('version:v1'),
+  t: s.$uint,
+  name: s.$string,
+  createdAt: s.$uint,
+  updatedAt: s.$uint,
+  createdBy: s.$string.nullable,
+  updatedBy: s.$string.nullable,
+  custom: s.$any,
+  // reserved for future use - no effect yet beyond freezing the version (see `history.publish`)
+  published: s.$boolean,
+  // when and by whom the version was published - null while it isn't
+  publishedAt: s.$uint.nullable,
+  publishedBy: s.$string.nullable
+})
+
+/**
+ * @typedef {s.Unwrap<typeof $version>} Version
+ */
+
+// `published` defaults to false - a write that omits it can only unpublish, never publish
+const versionInputShape = { type: s.$literal('version:v1'), name: s.$string, custom: s.$any.optional, published: s.$boolean.optional }
+
+/**
+ * What a client writes to create a named version: the client's part of `$version`. Without `t`,
+ * the version names the last update of the document.
+ */
+export const $versionCreate = $strictObject({ ...versionInputShape, t: s.$uint.optional })
+
+/**
+ * What a client writes to create or replace the named version at `t`.
+ */
+export const $versionPut = $strictObject({ ...versionInputShape, t: s.$uint })
+
+/**
+ * What a client writes to replace the named version at `t` - only while it is still the state
+ * the client read, the one with this `updatedAt`.
+ */
+export const $versionPatch = $strictObject({ ...versionInputShape, t: s.$uint, updatedAt: s.$uint })
 
 /**
  * Thrown at a callsite that read a deleted document (see `YHub.deleteDoc`). `getDoc` itself never
@@ -402,7 +461,7 @@ export const createAuthorize = handlers => async (scope, resourceId, user) => (a
  * segments, e.g. '/:commentId'), `cors` (overrides `server.cors` for this endpoint - `null`
  * disables cors on it). Each method is defined as a `{ $query?, handler }` object - see
  * `ApiMethodDef`. Names of built-in endpoints (`ydoc`, `rollback`, `prune`, `changeset`,
- * `activity`, `ws`) are reserved and refused in any version - one name in the `endpoint`
+ * `activity`, `version`, `ws`) are reserved and refused in any version - one name in the `endpoint`
  * permission facet must mean one route family (`ws` is the websocket route's entry: `r` opens
  * the socket, `u` admits doc updates over it).
  *
@@ -593,6 +652,12 @@ export const $config = s.$object({
      * must exceed the largest document. (default: 500MB)
      */
     maxDocSize: s.$number.optional,
+    /**
+     * Maximum size of the client's part of a named version: the characters of its `name` plus the
+     * bytes of its lib0-any encoded `custom` data. Versions ride along in activity responses, so
+     * keep it small. (default: 64K)
+     */
+    maxVersionSize: s.$number.optional,
     /**
      * Cross-origin resource sharing. While this is unset, no `Access-Control-*` header is sent
      * and cross-origin websocket upgrades and api requests are denied - only same-origin pages

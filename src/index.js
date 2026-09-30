@@ -23,9 +23,9 @@ const log = logger.child({ module: 'worker' })
 
 /**
  * Erase the content of a deleted `docRef`: its rows in `yhub_ydoc_v1` together with the assets they
- * reference, and any quarantined backlog in redis. Goes through the same `deleteReferences` path
- * compaction uses, so a row is always dropped before the asset it points at - the reverse would
- * leave references dangling, which read back as silently missing content.
+ * reference, its named versions, and any quarantined backlog in redis. Goes through the same
+ * `deleteReferences` path compaction uses, so a row is always dropped before the asset it points at
+ * - the reverse would leave references dangling, which read back as silently missing content.
  *
  * Deliberately not part of the public api. Erasing content is only safe once `hard` is set, which
  * is what arms the barrier in `Persistence.store` against a compaction that is still in flight;
@@ -337,7 +337,7 @@ export class YHub {
    * 'permission revoked') when the permissions the socket consumes changed - the `ydoc` mask,
    * the `awareness` mask, the effective `ws` endpoint mask, or (on `gc=false` connections)
    * whether full history is still granted; REST-only facets (`delete`,
-   * `history.rollback`/`prune`, the other `endpoint` entries) never bounce a live
+   * `history.rollback`/`prune`/`version`/`publish`, the other `endpoint` entries) never bounce a live
    * connection. The client then reconnects, re-authenticates, and resyncs at its new access
    * level. A failing auth plugin fails closed with the transient close code 1013 ('auth recheck
    * failed'), so clients reconnect once the auth backend recovers. With `forceDisconnect: true`,
@@ -500,6 +500,7 @@ export const createYHub = async conf => {
   // sanitize conf
   if (conf.server) {
     conf.server.maxDocSize ??= 500 * 1024 * 1024
+    conf.server.maxVersionSize ??= 64 * 1024
   }
   const stream = await strm.createStream(conf)
   const pers = await p.createPersistence(conf.postgres, conf.persistence)

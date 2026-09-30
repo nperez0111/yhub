@@ -1,11 +1,14 @@
 import * as Y from '@y/y'
+import * as array from 'lib0/array'
 import * as buffer from 'lib0/buffer'
 import * as decoding from 'lib0/decoding'
 import * as math from 'lib0/math'
 import * as number from 'lib0/number'
 import * as s from 'lib0/schema'
-import { createApiEndpoint, DocDeletedError } from './types.js'
+import * as sha256 from 'lib0/hash/sha256'
+import { createApiEndpoint, DocDeletedError, $updateMessage, $versionCreate, $versionPut, $versionPatch } from './types.js'
 import { createDocumentPermissions, hasPermissions } from './permissions.js'
+import { redisClockToMs } from './stream.js'
 // benign import cycle with api.js - apiError/checkPermissions are only referenced at request
 // time, never during module evaluation
 import { apiError, checkPermissions, encodedAny } from './api.js'
@@ -221,7 +224,8 @@ const activityEndpoint = createApiEndpoint('activity', {
       // raw `k:v,k:v` string - parsed in the handler; the raw string is part of the cache key
       withCustomAttributions: s.$string.optional,
       // base64-encoded Y.ContentIds - decoded in the handler; the raw string is part of the cache key
-      contentIds: s.$string.optional
+      contentIds: s.$string.optional,
+      versions: s.$boolean.optional
     },
     handler: async req => {
       const { docRef, query } = req
@@ -231,7 +235,10 @@ const activityEndpoint = createApiEndpoint('activity', {
       // args - see the changeset endpoint; rendered content demands ydoc read
       const h = req.permissions?.history
       const from = math.max(query.from ?? 0, h ? h.from : 0)
-      checkPermissions(req.permissions, createDocumentPermissions({ history: { from }, ...((includeYdoc || includeDelta) && { ydoc: '-r--' }) }))
+      // named versions ride along whenever the caller may read them - an explicit `?versions=true`
+      // without the grant is refused, never dropped
+      const includeVersions = query.versions ?? hasPermissions(req.permissions, createDocumentPermissions({ history: { from, version: '-r--' } }))
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from, ...(includeVersions && { version: '-r--' }) }, ...((includeYdoc || includeDelta) && { ydoc: '-r--' }) }))
       const by = query.by || ''
       const to = math.max(query.to ?? number.MAX_SAFE_INTEGER, from) // see changeset
       const includeAttributions = query.attributions ?? false
@@ -246,11 +253,18 @@ const activityEndpoint = createApiEndpoint('activity', {
       const includeCustomAttributions = query.customAttributions ?? false
       const contentIds = query.contentIds ? buffer.fromBase64(query.contentIds) : undefined
       try {
-        const cacheArgs = [String(from), String(to), by, String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), query.groupExclude || '', query.withCustomAttributions || '', String(includeCustomAttributions), query.contentIds || '', String(groupByUser)]
+        // read ahead of the cache: their digest keys the response, so a version write never meets
+        // a stale cached response and needs no invalidation. Without versions this is the digest
+        // of `[]` - and the response is that of a window without versions
+        // every entry carries at most one version, so `limit` entries need at most the first `limit`
+        // versions in reading order - plus one: descending, the version before them bounds where the
+        // oldest kept entry starts
+        const versions = includeVersions ? await req.yhub.persistence.retrieveVersions(docRef, { from, to, limit: limit > 0 && limit < number.MAX_SAFE_INTEGER ? math.floor(limit) + 1 : undefined, order: reverse ? 'desc' : 'asc' }) : []
+        const cacheArgs = [String(from), String(to), by, String(includeDelta), String(includeYdoc), String(includeAttributions), String(limit), reverse ? 'desc' : 'asc', String(group), String(groupMaxGap), String(groupMaxDuration), query.groupExclude || '', query.withCustomAttributions || '', String(includeCustomAttributions), query.contentIds || '', String(groupByUser), buffer.toBase64(sha256.digest(buffer.encodeAny(versions)))]
         return encodedAny(await req.yhub.stream.cachedGet(docRef, 'activity', cacheArgs, async () => {
           const { contentmap: contentmapBin, nongcDoc, tombstone } = await req.yhub.getDoc(docRef, { nongc: true, contentmap: true })
           if (tombstone != null) throw new DocDeletedError(docRef, tombstone)
-          return req.yhub.computePool.activity({ nongcDoc, contentmapBin, from, to, by, contentIds, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupByUser, groupMaxGap, groupMaxDuration, groupExclude }, { docRef })
+          return req.yhub.computePool.activity({ nongcDoc, contentmapBin, from, to, by, contentIds, withCustomAttributions, includeCustomAttributions, includeDelta, includeYdoc, includeAttributions, limit, reverse, group, groupByUser, groupMaxGap, groupMaxDuration, groupExclude, versions }, { docRef })
         }))
       } catch (err) {
         // see the changeset endpoint
@@ -263,8 +277,143 @@ const activityEndpoint = createApiEndpoint('activity', {
 })
 
 /**
+ * The version endpoint never reads the document, so this is its deletion gate. A soft deletion
+ * keeps the named versions for a restore, a hard one erases them with the content.
+ *
+ * @param {import('./index.js').YHub} yhub
+ * @param {import('./types.js').DocRef} docRef
+ */
+const refuseDeleted = async (yhub, docRef) => {
+  const tombstone = await yhub.persistence.retrieveTombstone(docRef)
+  if (tombstone != null) throw new DocDeletedError(docRef, tombstone)
+}
+
+/**
+ * The client's `custom` data of a named version, lib0-any encoded. The client's part of a version
+ * - its name and custom data - rides along in activity responses, so its size is bounded
+ * (`server.maxVersionSize`).
+ *
+ * @param {import('./index.js').YHub} yhub
+ * @param {{ name: string, custom?: any }} version
+ */
+const encodeVersionCustom = (yhub, { name, custom }) => {
+  const encoded = /** @type {Uint8Array<ArrayBuffer>} */ (buffer.encodeAny(custom ?? null))
+  const max = /** @type {number} */ (yhub.conf.server?.maxVersionSize)
+  if (name.length + encoded.byteLength > max) throw apiError(413, `name characters and custom bytes of a named version exceed ${max}`, { code: 'version-too-large' })
+  return encoded
+}
+
+/**
+ * `history.publish` at `t`. It sets a named version's `published` flag - a flag sent without it is
+ * ignored, like presence without awareness `u` on PATCH /ydoc - and it writes published versions,
+ * which are frozen for everyone else.
+ *
+ * @param {number} t
+ */
+const publishing = t => createDocumentPermissions({ history: { from: t, publish: true } })
+
+// named versions: `t` is a point of the document's history - an `activity.to` - and the ray must
+// contain it. Reads clamp, mutations refuse (see rollback). Writes are attributed to the caller.
+const versionEndpoint = createApiEndpoint('version', {
+  get: {
+    $query: { from: s.$uint.optional, to: s.$uint.optional },
+    handler: async req => {
+      const { docRef, query } = req
+      const h = req.permissions?.history
+      const from = math.max(query.from ?? 0, h ? h.from : 0)
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from, version: '-r--' } }))
+      await refuseDeleted(req.yhub, docRef)
+      return { versions: await req.yhub.persistence.retrieveVersions(docRef, { from, to: math.max(query.to ?? number.MAX_SAFE_INTEGER, from) }) }
+    }
+  },
+  post: {
+    $body: $versionCreate,
+    handler: async req => {
+      const { docRef, body } = req
+      // without `t` the point is only known after reading the history - nothing is read before
+      // the caller may create versions at all
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: body.t ?? number.MAX_SAFE_INTEGER, version: 'c---' } }))
+      if (req.authInfo == null) throw apiError(401, 'writing a named version requires authentication', { code: 'unauthenticated' })
+      const custom = encodeVersionCustom(req.yhub, body)
+      const { lastClock, tombstone } = await req.yhub.persistence.retrieveAssets(docRef, {})
+      if (tombstone != null) throw new DocDeletedError(docRef, tombstone)
+      // a version names a point of the existing history, never the server's clock: omitted, it is
+      // the last update on the stream, else the last persisted one. '0' - no history - names nothing.
+      let t = body.t
+      if (t == null) {
+        const [streamed] = await req.yhub.stream.getMessages([{ docRef, clock: '0' }])
+        const lastUpdate = array.last(streamed?.messages.filter(m => $updateMessage.check(m)) ?? [])
+        t = redisClockToMs(lastUpdate?.redisClock ?? lastClock)
+      }
+      if (t === 0) throw apiError(400, 'no point of the document history to name', { code: 'no-history' })
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: t, version: 'c---' } }))
+      const published = hasPermissions(req.permissions, publishing(t)) ? body.published : undefined
+      const version = await req.yhub.persistence.storeVersion(docRef, { t, name: body.name, custom, published, at: await req.yhub.stream.getTime(), by: req.authInfo.userid })
+      // `null` is also a hard deletion racing this request - too rare to tell apart
+      if (version == null) throw apiError(409, `a named version exists at ${t}`, { code: 'version-exists' })
+      return version
+    }
+  },
+  put: {
+    $body: $versionPut,
+    handler: async req => {
+      const { docRef, body } = req
+      // creates or replaces - whichever happens, both are required
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: body.t, version: 'c-u-' } }))
+      if (req.authInfo == null) throw apiError(401, 'writing a named version requires authentication', { code: 'unauthenticated' })
+      const custom = encodeVersionCustom(req.yhub, body)
+      await refuseDeleted(req.yhub, docRef)
+      const publisher = hasPermissions(req.permissions, publishing(body.t))
+      const version = await req.yhub.persistence.storeVersion(docRef, { t: body.t, name: body.name, custom, published: publisher ? body.published : undefined, at: await req.yhub.stream.getTime(), by: req.authInfo.userid }, { replace: true, mayWritePublished: publisher })
+      if (version == null) {
+        // a published version the caller may not write - or a hard deletion racing this request
+        const [current] = await req.yhub.persistence.retrieveVersions(docRef, { from: body.t, to: body.t })
+        if (current != null) checkPermissions(req.permissions, publishing(body.t))
+        throw apiError(404, 'document was deleted', { code: 'doc-deleted' })
+      }
+      return version
+    }
+  },
+  patch: {
+    $body: $versionPatch,
+    handler: async req => {
+      const { docRef, body } = req
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: body.t, version: '--u-' } }))
+      if (req.authInfo == null) throw apiError(401, 'writing a named version requires authentication', { code: 'unauthenticated' })
+      const custom = encodeVersionCustom(req.yhub, body)
+      await refuseDeleted(req.yhub, docRef)
+      const publisher = hasPermissions(req.permissions, publishing(body.t))
+      const { updated, version } = await req.yhub.persistence.updateVersion(docRef, { t: body.t, name: body.name, custom, published: publisher ? body.published : undefined, at: await req.yhub.stream.getTime(), by: req.authInfo.userid, updatedAt: body.updatedAt }, { mayWritePublished: publisher })
+      if (version == null) throw apiError(404, `no named version at ${body.t}`, { code: 'version-not-found' })
+      if (!updated) {
+        // the state the caller read, but published - frozen for callers that may not publish
+        if (version.updatedAt === body.updatedAt) checkPermissions(req.permissions, publishing(body.t))
+        // written since the caller read it - the current version lets it merge and retry
+        throw apiError(409, `the named version at ${body.t} changed since ${body.updatedAt}`, { code: 'version-conflict', version })
+      }
+      return version
+    }
+  },
+  delete: {
+    $query: { t: s.$uint, updatedAt: s.$uint },
+    handler: async req => {
+      const { docRef, query: { t, updatedAt } } = req
+      checkPermissions(req.permissions, createDocumentPermissions({ history: { from: t, version: '---d' } }))
+      await refuseDeleted(req.yhub, docRef)
+      const { deleted, version } = await req.yhub.persistence.deleteVersion(docRef, { t, updatedAt }, { mayWritePublished: hasPermissions(req.permissions, publishing(t)) })
+      // a version that is gone already is what the caller asked for: deleting is idempotent
+      if (!deleted && version != null) {
+        // see PATCH: frozen, or written since the caller read it
+        if (version.updatedAt === updatedAt) checkPermissions(req.permissions, publishing(t))
+        throw apiError(409, `the named version at ${t} changed since ${updatedAt}`, { code: 'version-conflict', version })
+      }
+    }
+  }
+})
+
+/**
  * The built-in rest endpoints, registered by default ahead of `conf.server.api` (see registerApi).
  *
  * @type {Array<import('./types.js').ApiEndpoint>}
  */
-export const builtinApi = [ydocEndpoint, rollbackEndpoint, pruneEndpoint, changesetEndpoint, activityEndpoint]
+export const builtinApi = [ydocEndpoint, rollbackEndpoint, pruneEndpoint, changesetEndpoint, activityEndpoint, versionEndpoint]
