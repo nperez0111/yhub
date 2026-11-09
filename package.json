@@ -23,6 +23,7 @@
     "dist": "npm run types",
     "types": "tsc --skipLibCheck",
     "lint": "standard && tsc --skipLibCheck",
+    "benchmark:compute-memory": "node --expose-gc scripts/benchmark-compute-memory.js",
     "pretest": "node scripts/dev-env.js --up",
     "test": "bash -o pipefail -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env --env-file-if-exists .env.testing tests/index.js \"$@\" | pino-pretty -S -L debug' --",
     "debug:test": "bash -o pipefail -c 'FORCE_COLOR=true node --expose-gc --max-old-space-size=8192 --env-file .env --env-file-if-exists .env.testing --inspect-brk tests/index.js \"$@\" | pino-pretty -S' --",

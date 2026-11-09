@@ -1,4 +1,4 @@
-import { parentPort } from 'node:worker_threads'
+import { isMarkedAsUntransferable, parentPort, workerData } from 'node:worker_threads'
 import * as Y from '@y/y'
 import * as encoding from 'lib0/encoding'
 import * as delta from 'lib0/delta'
@@ -51,6 +51,61 @@ const filterContentMap = (contentMap, from, to, by, requestedIds, customAttribut
 }
 
 const port = parentPort
+const { idleGcThreshold = 0, idleGcDelay = 1000 } = /** @type {{ idleGcThreshold?: number, idleGcDelay?: number }} */ (workerData)
+/** @type {NodeJS.Timeout?} */
+let idleGcTimer = null
+
+/**
+ * Find every backing store in a task. Structured clone preserves duplicate references and views
+ * over the same store, so a set both measures and releases each allocation once.
+ *
+ * @param {any} value
+ * @param {Set<object>} [seen]
+ * @param {Set<ArrayBufferLike>} [buffers]
+ */
+const taskBuffers = (value, seen = new Set(), buffers = new Set()) => {
+  if (ArrayBuffer.isView(value)) {
+    buffers.add(value.buffer)
+  } else if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && value instanceof SharedArrayBuffer)) {
+    buffers.add(value)
+  } else if (value != null && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value)
+    Object.values(value).forEach(child => taskBuffers(child, seen, buffers))
+  }
+  return buffers
+}
+
+/**
+ * The task received by this worker is a private structured-clone copy. Detach its transferable
+ * stores once synchronous processing and result transfer have finished, rather than waiting for
+ * this isolate's next GC. Shared and explicitly nontransferable stores are never detached.
+ *
+ * @param {Set<ArrayBufferLike>} buffers
+ */
+const releaseTaskBuffers = buffers => {
+  buffers.forEach(buffer => {
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0 || isMarkedAsUntransferable(buffer)) return
+    try {
+      /** @type {ArrayBuffer & { transfer: (newByteLength?: number) => ArrayBuffer }} */ (buffer).transfer(0)
+    } catch (err) {
+      log.debug({ err }, 'unable to release compute task input buffer')
+    }
+  })
+}
+
+/**
+ * @param {number} inputBytes
+ */
+const scheduleIdleGc = inputBytes => {
+  const gc = /** @type {{ gc?: () => void }} */ (globalThis).gc
+  if (idleGcThreshold <= 0 || inputBytes < idleGcThreshold || typeof gc !== 'function') return
+  idleGcTimer = setTimeout(() => {
+    idleGcTimer = null
+    gc()
+    port.postMessage({ type: 'compute:idle-gc' })
+  }, idleGcDelay)
+  idleGcTimer.unref()
+}
 
 /**
  * @param {import('./compute.js').ComputeTask} msg
@@ -331,11 +386,18 @@ const runTask = msg => {
 }
 
 port.on('message', /** @param {import('./compute.js').ComputeTask} msg */ msg => {
+  idleGcTimer != null && clearTimeout(idleGcTimer)
+  idleGcTimer = null
+  const buffers = taskBuffers(msg)
+  const inputBytes = Array.from(buffers).reduce((sum, buffer) => sum + buffer.byteLength, 0)
   try {
     runTask(msg)
   } catch (err) {
     // a task that throws - on malformed input, like a client's state vector - fails alone: the
     // error rejects it (see `ComputeWorker`) and the thread stays alive for the next task
     port.postMessage(err)
+  } finally {
+    releaseTaskBuffers(buffers)
+    scheduleIdleGc(inputBytes)
   }
 })

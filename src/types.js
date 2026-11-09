@@ -632,6 +632,22 @@ export const $config = s.$object({
      */
     maxThreads: s.$number.optional,
     /**
+     * Collect a worker isolate after a task with at least this many input bytes has been idle for
+     * `idleGcDelay`. Requires starting node with `--expose-gc`. 0 disables it. (default: 0)
+     */
+    idleGcThreshold: s.$number.optional,
+    /**
+     * Idle milliseconds before a threshold-triggered worker-local collection. A new task cancels
+     * the pending collection. (default: 1000)
+     */
+    idleGcDelay: s.$number.optional,
+    /**
+     * Retire a thread after this many idle ms. Threads are recreated on demand. This is a fallback
+     * for releasing isolate/native memory at the cost of cold-start latency. 0 disables it.
+     * (default: 0)
+     */
+    idleTimeout: s.$number.optional,
+    /**
      * Maximum number of tasks waiting for a free thread. Each one holds its documents in memory
      * until a thread takes it. A task beyond the limit is rejected with an error whose `code` is
      * `'COMPUTE_QUEUE_FULL'`: rest requests answer 503, a websocket's initial sync closes with

@@ -7,6 +7,7 @@ import * as auth from './auth.tests.js'
 import * as ws from './ws.tests.js'
 import * as storage from './storage.tests.js'
 import * as computeWorker from './computeWorker.tests.js'
+import * as computeMemory from './computeMemory.tests.js'
 import * as agents from './agents.tests.js'
 import * as deleteDoc from './delete.tests.js'
 import * as versions from './versions.tests.js'
@@ -26,6 +27,7 @@ runTests({
   permissions,
   permissionsEnforcement,
   computeWorker,
+  computeMemory,
   storage,
   stream,
   worker,

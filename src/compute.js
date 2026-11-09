@@ -112,6 +112,8 @@ const finishWorker = (cw) => {
   cw._cbReject = null
   cw._taskTimeout != null && clearTimeout(cw._taskTimeout)
   cw._taskTimeout = null
+  cw._idleTimeout != null && clearTimeout(cw._idleTimeout)
+  cw._idleTimeout = null
 }
 
 class ComputeWorker {
@@ -123,7 +125,11 @@ class ComputeWorker {
     // a thread that exceeds its resourceLimits dies on its own ('error', then 'exit' below).
     // Without them, every thread may grow to the main thread's heap limit - together they can
     // outgrow the container, whose OOM killer then ends the whole process
-    this.worker = new Worker(workerUrl, { execArgv: [], resourceLimits: pool.resourceLimits })
+    this.worker = new Worker(workerUrl, {
+      execArgv: [],
+      resourceLimits: pool.resourceLimits,
+      workerData: { idleGcThreshold: pool.idleGcThreshold, idleGcDelay: pool.idleGcDelay }
+    })
     this.isComputing = false
     this.isDead = false
     /**
@@ -142,7 +148,15 @@ class ComputeWorker {
      * @type {NodeJS.Timeout?}
      */
     this._taskTimeout = null
+    /** @type {NodeJS.Timeout?} */
+    this._idleTimeout = null
+    // Internal observability used by lifecycle tests and memory benchmarks.
+    this.idleGcRuns = 0
     this.worker.on('message', (result) => {
+      if (result?.type === 'compute:idle-gc') {
+        this.idleGcRuns++
+        return
+      }
       const resolve = this._cbResolve
       const reject = this._cbReject
       finishWorker(this)
@@ -150,6 +164,12 @@ class ComputeWorker {
       result instanceof Error ? reject?.(result) : resolve?.(result)
       this._logContext = null
       drain(pool)
+      if (!this.isComputing && !this.isDead && pool.idleTimeout > 0) {
+        this._idleTimeout = setTimeout(() => {
+          this.terminate().catch(err => log.warn({ err }, 'failed to terminate idle compute worker'))
+        }, pool.idleTimeout)
+        this._idleTimeout.unref()
+      }
     })
     this.worker.on('error', (err) => {
       log.error({ err, ...this._logContext }, 'worker failed')
@@ -181,6 +201,8 @@ class ComputeWorker {
    * @param {(reason: any) => void} reject
    */
   run (task, transferList, logContext, resolve, reject) {
+    this._idleTimeout != null && clearTimeout(this._idleTimeout)
+    this._idleTimeout = null
     this.isComputing = true
     this._cbResolve = resolve
     this._cbReject = reject
@@ -247,7 +269,18 @@ export const createComputePool = (opts = {}) => {
   if (opts.resourceLimits?.maxOldGenerationSizeMb != null && [...process.execArgv, process.env.NODE_OPTIONS ?? ''].some(arg => /--max[-_](old[-_]space|heap)[-_]size/.test(arg))) {
     log.warn({ maxOldGenerationSizeMb: opts.resourceLimits.maxOldGenerationSizeMb }, 'computePool.resourceLimits.maxOldGenerationSizeMb has no effect: the process runs with --max-old-space-size or --max-heap-size')
   }
-  return new ComputePool(opts.maxThreads ?? math.max(1, cpus().length - 1), opts.maxQueue ?? Infinity, opts.taskTimeout ?? 30 * 60 * 1000, opts.resourceLimits)
+  if ((opts.idleGcThreshold ?? 0) > 0 && typeof /** @type {{ gc?: () => void }} */ (globalThis).gc !== 'function') {
+    log.warn('computePool.idleGcThreshold has no effect: start node with --expose-gc to enable worker-local idle collection')
+  }
+  return new ComputePool(
+    opts.maxThreads ?? math.max(1, cpus().length - 1),
+    opts.maxQueue ?? Infinity,
+    opts.taskTimeout ?? 30 * 60 * 1000,
+    opts.resourceLimits,
+    opts.idleGcThreshold ?? 0,
+    opts.idleGcDelay ?? 1000,
+    opts.idleTimeout ?? 0
+  )
 }
 
 class ComputePool {
@@ -255,13 +288,19 @@ class ComputePool {
    * @param {number} maxThreads
    * @param {number} maxQueue tasks that may wait for a thread; `run` rejects any further task
    * @param {number} taskTimeout ms after which a running task's worker thread is killed, and a queued task is rejected
-   * @param {import('node:worker_threads').ResourceLimits} [resourceLimits] of each worker thread
+   * @param {import('node:worker_threads').ResourceLimits | undefined} resourceLimits of each worker thread
+   * @param {number} idleGcThreshold input bytes above which an idle worker collects its isolate; 0 disables
+   * @param {number} idleGcDelay ms a worker remains idle before collection
+   * @param {number} idleTimeout ms before retiring an idle thread; 0 keeps it alive
    */
-  constructor (maxThreads, maxQueue, taskTimeout, resourceLimits) {
+  constructor (maxThreads, maxQueue, taskTimeout, resourceLimits, idleGcThreshold, idleGcDelay, idleTimeout) {
     this.maxThreads = maxThreads
     this.maxQueue = maxQueue
     this.taskTimeout = taskTimeout
     this.resourceLimits = resourceLimits
+    this.idleGcThreshold = idleGcThreshold
+    this.idleGcDelay = idleGcDelay
+    this.idleTimeout = idleTimeout
     /**
      * @type {Array<ComputeWorker>}
      */

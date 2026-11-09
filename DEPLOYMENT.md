@@ -301,3 +301,36 @@ within milliseconds, unless a hard deletion just queued S3 deletes.
 A process killed with `SIGKILL` drops its connections without a close frame. Its tasks are
 reclaimed after `REDIS_TASK_DEBOUNCE` and nothing is lost, but any pending S3 deletes are
 orphaned.
+
+---
+
+## 10. Optional Linux allocator tuning
+
+Worker-local collection (`computePool.idleGcThreshold`) makes large temporary Yjs buffers
+unreachable promptly, but the system allocator may keep the freed pages resident. On glibc-based
+Linux images, jemalloc can return those pages more promptly. This is deployment tuning, not a
+portable yhub default:
+
+```bash
+LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+MALLOC_CONF=background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000 \
+node --expose-gc ./bin/yhub.js
+```
+
+Verify that the library exists at that path in the image and benchmark peak RSS, post-idle RSS,
+CPU, throughput and request latency before adopting it. jemalloc addresses allocator retention;
+it does not decide when JavaScript objects in worker isolates are collected. `MALLOC_ARENA_MAX`
+is not a reliable substitute across workloads.
+
+The included benchmark runs repeated large merges across a warm compute pool and reports peak and
+post-idle process memory in MiB:
+
+```bash
+npm run benchmark:compute-memory -- \
+  --document-mb=16 --workers=3 --rounds=3 \
+  --idle-gc-threshold=8388608 --idle-gc-delay=250
+```
+
+Run it several times in the same production image and resource limits. Compare with
+`--idle-gc-threshold=0`, then repeat with allocator tuning if applicable. This is a synthetic
+allocator/worker benchmark, not a substitute for request-latency and throughput load tests.
